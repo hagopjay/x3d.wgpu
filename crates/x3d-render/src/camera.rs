@@ -120,8 +120,7 @@ impl OrbitCamera {
         let view = self.view();
         let right = view.row(0).truncate();
         let up = view.row(1).truncate();
-        let per_pixel =
-            2.0 * self.distance * (self.field_of_view * 0.5).tan() / viewport_height.max(1.0);
+        let per_pixel = 2.0 * self.distance * (self.field_of_view * 0.5).tan() / viewport_height.max(1.0);
         self.target += (-right * dx + up * dy) * per_pixel;
     }
 
@@ -138,11 +137,7 @@ mod tests {
     #[test]
     fn default_viewpoint_round_trips() {
         let cam = OrbitCamera::from_viewpoint(&Viewpoint::default(), Aabb::EMPTY);
-        assert!(
-            (cam.eye() - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-4,
-            "{}",
-            cam.eye()
-        );
+        assert!((cam.eye() - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-4, "{}", cam.eye());
         assert!((cam.forward() - Vec3::NEG_Z).length() < 1e-5);
     }
 
@@ -154,13 +149,7 @@ mod tests {
             orientation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             ..Default::default()
         };
-        let cam = OrbitCamera::from_viewpoint(
-            &vp,
-            Aabb {
-                min: Vec3::splat(-1.0),
-                max: Vec3::ONE,
-            },
-        );
+        let cam = OrbitCamera::from_viewpoint(&vp, Aabb { min: Vec3::splat(-1.0), max: Vec3::ONE });
         assert!((cam.eye() - vp.position).length() < 1e-4);
         assert!((cam.forward() - Vec3::NEG_X).length() < 1e-4);
     }

@@ -108,18 +108,11 @@ impl Gpu {
         // By default wgpu *panics* on a validation error. A tinkering tool
         // should log instead (and the shader hot-reload path catches its own).
         device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu: {e}")));
-        Ok(Self {
-            instance,
-            adapter,
-            device,
-            queue,
-        })
+        Ok(Self { instance, adapter, device, queue })
     }
 
     pub fn supports_wireframe(&self) -> bool {
-        self.device
-            .features()
-            .contains(wgpu::Features::POLYGON_MODE_LINE)
+        self.device.features().contains(wgpu::Features::POLYGON_MODE_LINE)
     }
 
     /// One line for logs: `llvmpipe (LLVM 20.1.2, 256 bits) — Vulkan, Cpu`.
@@ -129,17 +122,11 @@ impl Gpu {
 }
 
 pub fn describe(info: &wgpu::AdapterInfo) -> String {
-    format!(
-        "{} — {:?}, {:?}, driver {} {}",
-        info.name, info.backend, info.device_type, info.driver, info.driver_info
-    )
+    format!("{} — {:?}, {:?}, driver {} {}", info.name, info.backend, info.device_type, info.driver, info.driver_info)
 }
 
 /// Every adapter wgpu can see (`x3d-view adapters`).
 pub fn list_adapters(backend: Backend) -> Vec<wgpu::AdapterInfo> {
     let instance = make_instance(backend);
-    pollster::block_on(instance.enumerate_adapters(backend.to_wgpu()))
-        .into_iter()
-        .map(|a| a.get_info())
-        .collect()
+    pollster::block_on(instance.enumerate_adapters(backend.to_wgpu())).into_iter().map(|a| a.get_info()).collect()
 }

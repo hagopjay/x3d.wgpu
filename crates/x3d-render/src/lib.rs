@@ -17,8 +17,11 @@
 //! [`camera`] → [`headless`] → `viewer`.
 
 pub mod camera;
+pub mod custom;
+pub mod glsl;
 pub mod gpu;
 pub mod headless;
+pub mod post;
 pub mod renderer;
 pub mod textures;
 pub mod uniforms;
@@ -29,4 +32,4 @@ pub mod viewer;
 pub use camera::OrbitCamera;
 pub use gpu::{Backend, Gpu};
 pub use headless::{Shot, render_scene, render_sheet};
-pub use renderer::{ColorMode, DebugView, RenderSettings, Renderer};
+pub use renderer::{ColorMode, DebugView, RenderSettings, Renderer, ToneMap};

@@ -29,6 +29,9 @@ struct Frame {
     //     bit 1: lights[0] is the headlight (it reaches every draw)
     params: vec4u,
     near_far: vec4f,            // near, far planes; z..w = depth range shown by the Depth view
+    viewport: vec4f,            // width, height (pixels), line/point size multiplier
+    shadow_proj: mat4x4f,       // world → the sun's shadow-map clip space
+    shadow: vec4f,              // light index (−1 = none), depth bias, 1/map size, texel in world units
     lights: array<Light, 16>,
 }
 
@@ -42,9 +45,14 @@ struct Draw {
     pbr: vec4f,                 // metallic, roughness, occlusionStrength, normalScale
     flags: vec4u,               // x = unlit, y = vertex colours, z = 1 for PhysicalMaterial, w = texture bits
     light_mask: vec4u,          // x: bit i = scene light i reaches this draw (X3D light scoping)
+    line: vec4f,                // x: line width / point size in pixels
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var shadow_map: texture_depth_2d;
+// A *comparison* sampler: it answers "is the stored depth ≥ mine?" and,
+// with linear filtering, blends the answers of 4 texels (free 2×2 PCF).
+@group(0) @binding(2) var shadow_sampler: sampler_comparison;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(2) @binding(0) var t_base: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
@@ -89,6 +97,65 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+// --- lines and points as screen-space quads --------------------------------
+//
+// 🎨 GPUs draw `LineList` and `PointList` exactly 1 pixel wide (WebGPU has
+// no line width), and some drivers clip such lines badly when an end is
+// behind the camera. So each segment becomes an *instance* of a 6-vertex
+// quad: both ends go to clip space, the segment is cut where it crosses the
+// near plane, and the quad is pushed sideways by half the width *in pixels*.
+// A point is a segment whose two ends are the same: it becomes a square.
+
+struct SegmentIn {
+    @location(0) a: vec3f,
+    @location(1) b: vec3f,
+    @location(2) color_a: vec4f,
+    @location(3) color_b: vec4f,
+}
+
+@vertex
+fn vs_wide(@builtin(vertex_index) vi: u32, in: SegmentIn) -> VsOut {
+    // Two triangles: (x = which end, −1 a / +1 b; y = which side).
+    var corners = array(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+                        vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+    let corner = corners[vi];
+    let world_a = draw.model * vec4f(in.a, 1.0);
+    let world_b = draw.model * vec4f(in.b, 1.0);
+    var ca = frame.view_proj * world_a;
+    var cb = frame.view_proj * world_b;
+    var out: VsOut;
+    // wgpu's clip space keeps 0 ≤ z ≤ w: cut what lies in front of z = 0.
+    if ca.z < 0.0 && cb.z < 0.0 {
+        out.clip = vec4f(0.0, 0.0, -1.0, 1.0);  // all behind us: clipped away
+        return out;
+    }
+    if ca.z < 0.0 { ca = mix(ca, cb, ca.z / (ca.z - cb.z)); }
+    if cb.z < 0.0 { cb = mix(cb, ca, cb.z / (cb.z - ca.z)); }
+
+    let half = frame.viewport.xy * 0.5;
+    let pa = ca.xy / ca.w * half;   // ends in pixels from the screen centre
+    let pb = cb.xy / cb.w * half;
+    let width = max(draw.line.x * frame.viewport.z, 1.0);
+    let is_point = all(in.a == in.b);
+    var dir = pb - pa;
+    dir = select(vec2f(1.0, 0.0), normalize(dir), dot(dir, dir) > 1e-8);
+    let side = vec2f(-dir.y, dir.x);
+    // Points: a square. Lines: sideways by half the width, and each end
+    // pushed out by half the width too (square caps, so joints close).
+    var offset = (corner.x * dir + corner.y * side) * width * 0.5;
+    if is_point { offset = corner * width * 0.5; }
+
+    let at_b = corner.x > 0.0;
+    let c = select(ca, cb, at_b);
+    out.clip = c + vec4f(offset / half * c.w, 0.0, 0.0);
+    out.world_pos = select(world_a, world_b, at_b).xyz;
+    out.normal = vec3f(0.0);
+    out.color = select(in.color_a, in.color_b, at_b);
+    out.view_depth = -(frame.view * select(world_a, world_b, at_b)).z;
+    out.uv = vec2f(0.0);
+    return out;
+}
+
 // --- colour space helpers -------------------------------------------------
 
 fn srgb_to_linear(c: vec3f) -> vec3f {
@@ -96,7 +163,10 @@ fn srgb_to_linear(c: vec3f) -> vec3f {
 }
 
 fn linear_to_srgb(c: vec3f) -> vec3f {
-    let x = clamp(c, vec3f(0.0), vec3f(1.0));
+    // In HDR mode (params.w bit 2) keep values above 1: the tone mapper
+    // decides what to do with them. Otherwise clip, as an 8-bit screen would.
+    let top = select(1.0, 1e4, (frame.params.w & 4u) != 0u);
+    let x = clamp(c, vec3f(0.0), vec3f(top));
     return select(1.055 * pow(x, vec3f(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3f(0.0031308));
 }
 
@@ -142,6 +212,42 @@ fn sample_light(light: Light, p: vec3f) -> LightSample {
     return LightSample(l, reach);
 }
 
+// --- shadows -----------------------------------------------------------------
+//
+// 🎨 A shadow map is a depth picture taken *from the light*. To shade a
+// point we move it into that picture and compare: if something nearer to
+// the light was recorded there, the point is in shadow.
+
+fn shadow_factor(p: vec3f, n: vec3f) -> f32 {
+    // Nudge along the normal by about a texel: fights "shadow acne", the
+    // stripes a surface gets from shadowing itself.
+    let q = frame.shadow_proj * vec4f(p + n * frame.shadow.w * 1.5, 1.0);
+    let ndc = q.xyz / q.w;
+    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) || ndc.z > 1.0 { return 1.0; }
+    // 3×3 PCF (each tap already 2×2 filtered): soft-ish edges.
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let o = vec2f(f32(x), f32(y)) * frame.shadow.z;
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, ndc.z - frame.shadow.y);
+        }
+    }
+    return lit / 9.0;
+}
+
+// How much of light `i` is unblocked at `p` (1 unless it is the sun).
+fn unshadowed(i: u32, p: vec3f, n: vec3f) -> f32 {
+    if i32(i) != i32(frame.shadow.x) { return 1.0; }
+    return shadow_factor(p, n);
+}
+
+// Shadow pass: only depth, seen from the light.
+@vertex
+fn vs_shadow(@location(0) position: vec3f) -> @builtin(position) vec4f {
+    return frame.shadow_proj * draw.model * vec4f(position, 1.0);
+}
+
 // --- X3D classic lighting (ISO/IEC 19775-1, 17.2.2.4 "Lighting equations") --
 //
 //   colour = emissive + Σ_lights  on · attenuation · spot · lightColour ·
@@ -169,7 +275,7 @@ fn shade_classic(p: vec3f, n: vec3f, base: vec3f, emissive: vec3f, specular: vec
             let h = normalize(s.l + v);  // Blinn's half vector
             spec = intensity * specular * pow(max(dot(n, h), 0.0), shininess);
         }
-        sum += s.reach * color * (ambient + diffuse + spec);
+        sum += s.reach * color * (ambient + unshadowed(i, p, n) * (diffuse + spec));
     }
     return clamp(emissive + sum, vec3f(0.0), vec3f(1.0));
 }
@@ -193,7 +299,7 @@ fn shade_pbr(p: vec3f, n: vec3f, base: vec3f, metallic: f32, roughness: f32, ao:
         if !light_reaches(i) { continue; }
         let light = frame.lights[i];
         let s = sample_light(light, p);
-        let radiance = light.color_intensity.rgb * light.color_intensity.w * s.reach;
+        let radiance = light.color_intensity.rgb * light.color_intensity.w * s.reach * unshadowed(i, p, n);
         sum += light.direction_ambient.w * light.color_intensity.rgb * diffuse_color * ao * s.reach;
         let n_dot_l = max(dot(n, s.l), 0.0);
         if n_dot_l <= 0.0 { continue; }

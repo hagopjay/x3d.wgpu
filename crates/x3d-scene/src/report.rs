@@ -32,6 +32,8 @@ pub struct Stats {
     pub points: usize,
     pub lights: usize,
     pub viewpoints: usize,
+    /// ROUTEs wired into the event graph.
+    pub routes: usize,
 }
 
 impl Report {
@@ -60,8 +62,7 @@ impl Report {
                 *mine.entry(k.clone()).or_default() += n;
             }
         }
-        self.warnings
-            .extend(other.warnings.iter().map(|w| format!("{from}: {w}")));
+        self.warnings.extend(other.warnings.iter().map(|w| format!("{from}: {w}")));
         self.inlined.push(from.to_owned());
         self.inlined.extend(other.inlined.iter().cloned());
     }
@@ -81,22 +82,11 @@ impl fmt::Display for Report {
         let s = &self.stats;
         writeln!(
             f,
-            "shapes {}  meshes {}  triangles {}  line segments {}  points {}  lights {}  viewpoints {}",
-            s.shapes,
-            s.unique_meshes,
-            s.triangles,
-            s.line_segments,
-            s.points,
-            s.lights,
-            s.viewpoints
+            "shapes {}  meshes {}  triangles {}  line segments {}  points {}  lights {}  viewpoints {}  routes {}",
+            s.shapes, s.unique_meshes, s.triangles, s.line_segments, s.points, s.lights, s.viewpoints, s.routes
         )?;
         if !self.inlined.is_empty() {
-            writeln!(
-                f,
-                "inlined {} file(s): {}",
-                self.inlined.len(),
-                self.inlined.join(", ")
-            )?;
+            writeln!(f, "inlined {} file(s): {}", self.inlined.len(), self.inlined.join(", "))?;
         }
         if self.is_lossless() {
             return writeln!(f, "nothing skipped ✔");
@@ -114,10 +104,7 @@ impl fmt::Display for Report {
         };
         table("skipped (not supported yet)", &self.unsupported)?;
         table("approximated", &self.approximated)?;
-        table(
-            "ignored (animation/interaction: this is a still)",
-            &self.ignored,
-        )?;
+        table("ignored (interaction, and ROUTEs not followed yet)", &self.ignored)?;
         if !self.warnings.is_empty() {
             writeln!(f, "warnings:")?;
             for w in &self.warnings {

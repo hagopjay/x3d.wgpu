@@ -17,10 +17,8 @@ fn x3d(body: &str) -> String {
 
 #[test]
 fn def_use_builds_geometry_once() {
-    let s = parse_str(&x3d(
-        "<Shape><Sphere DEF='Ball' radius='0.5'/></Shape>
-         <Transform translation='2 0 0'><Shape><Sphere USE='Ball'/></Shape></Transform>",
-    ))
+    let s = parse_str(&x3d("<Shape><Sphere DEF='Ball' radius='0.5'/></Shape>
+         <Transform translation='2 0 0'><Shape><Sphere USE='Ball'/></Shape></Transform>"))
     .unwrap();
     assert_eq!(s.draws.len(), 2);
     assert_eq!(s.report.stats.unique_meshes, 1, "USE should share the mesh");
@@ -30,16 +28,10 @@ fn def_use_builds_geometry_once() {
 
 #[test]
 fn use_of_a_whole_transform() {
-    let s = parse_str(&x3d(
-        "<Transform DEF='T' translation='0 1 0'><Shape><Box/></Shape></Transform>
-         <Transform translation='5 0 0'><Transform USE='T'/></Transform>",
-    ))
+    let s = parse_str(&x3d("<Transform DEF='T' translation='0 1 0'><Shape><Box/></Shape></Transform>
+         <Transform translation='5 0 0'><Transform USE='T'/></Transform>"))
     .unwrap();
-    let positions: Vec<Vec3> = s
-        .draws
-        .iter()
-        .map(|d| d.transform.w_axis.truncate())
-        .collect();
+    let positions: Vec<Vec3> = s.draws.iter().map(|d| d.transform.w_axis.truncate()).collect();
     assert_eq!(positions, [Vec3::Y, Vec3::new(5.0, 1.0, 0.0)]);
 }
 
@@ -56,10 +48,8 @@ fn switch_draws_only_its_choice() {
 
 #[test]
 fn nested_transforms_compose_parent_first() {
-    let s = parse_str(&x3d(
-        "<Transform translation='1 0 0'><Transform scale='2 2 2'><Transform translation='1 0 0'>
-           <Shape><Box/></Shape></Transform></Transform></Transform>",
-    ))
+    let s = parse_str(&x3d("<Transform translation='1 0 0'><Transform scale='2 2 2'><Transform translation='1 0 0'>
+           <Shape><Box/></Shape></Transform></Transform></Transform>"))
     .unwrap();
     // 1 + 2·1 = 3 along x.
     let origin = s.draws[0].transform.transform_point3(Vec3::ZERO);
@@ -77,21 +67,15 @@ fn indexed_face_set_with_per_face_colours() {
     let m = &s.draws[0].mesh;
     assert!(m.has_colors);
     assert_eq!(m.primitive_count(), 3); // quad (2) + triangle (1)
-    let colours: std::collections::HashSet<[u32; 4]> = m
-        .vertices
-        .iter()
-        .map(|v| v.color.map(f32::to_bits))
-        .collect();
+    let colours: std::collections::HashSet<[u32; 4]> = m.vertices.iter().map(|v| v.color.map(f32::to_bits)).collect();
     assert_eq!(colours.len(), 2);
 }
 
 #[test]
 fn lines_and_points_are_unlit() {
-    let s = parse_str(&x3d(
-        "<Shape><Appearance><Material emissiveColor='1 0 0'/></Appearance>
+    let s = parse_str(&x3d("<Shape><Appearance><Material emissiveColor='1 0 0'/></Appearance>
            <IndexedLineSet coordIndex='0 1 2 -1'><Coordinate point='0 0 0 1 0 0 1 1 0'/></IndexedLineSet></Shape>
-         <Shape><PointSet><Coordinate point='0 0 0 1 1 1'/></PointSet></Shape>",
-    ))
+         <Shape><PointSet><Coordinate point='0 0 0 1 1 1'/></PointSet></Shape>"))
     .unwrap();
     assert_eq!(s.draws[0].mesh.topology, Topology::Lines);
     assert_eq!(s.draws[0].mesh.primitive_count(), 2);
@@ -102,20 +86,15 @@ fn lines_and_points_are_unlit() {
 
 #[test]
 fn lights_are_in_world_space() {
-    let s = parse_str(&x3d(
-        "<Transform rotation='0 1 0 1.5707963'><DirectionalLight direction='0 0 -1'/></Transform>
+    let s = parse_str(&x3d("<Transform rotation='0 1 0 1.5707963'><DirectionalLight direction='0 0 -1'/></Transform>
          <Transform translation='0 3 0'><PointLight location='1 0 0'/></Transform>
-         <PointLight on='false'/>",
-    ))
+         <PointLight on='false'/>"))
     .unwrap();
-    assert_eq!(s.lights.len(), 2, "lights that are off are skipped");
-    let LightKind::Directional { direction } = s.lights[0].kind else {
-        panic!("not directional")
-    };
+    assert_eq!(s.lights.len(), 3, "lights that are off are kept (an event may turn them on)");
+    assert!(s.lights[0].on && s.lights[1].on && !s.lights[2].on);
+    let LightKind::Directional { direction } = s.lights[0].kind else { panic!("not directional") };
     assert!((direction - Vec3::NEG_X).length() < 1e-5, "{direction}");
-    let LightKind::Point { location, .. } = s.lights[1].kind else {
-        panic!("not a point light")
-    };
+    let LightKind::Point { location, .. } = s.lights[1].kind else { panic!("not a point light") };
     assert_eq!(location, Vec3::new(1.0, 3.0, 0.0));
 }
 
@@ -131,20 +110,14 @@ fn navigation_info_and_viewpoint() {
 
 #[test]
 fn unsupported_nodes_are_reported_not_dropped_silently() {
-    let s = parse_str(&x3d(
-        "<Shape><Text string='\"hi\"'/></Shape>
-         <TimeSensor loop='true'/>
-         <Shape><Appearance><ImageTexture url='\"a.png\"'/><Material/></Appearance><Box/></Shape>",
-    ))
+    let s = parse_str(&x3d("<Shape><Text string='\"hi\"'/></Shape>
+         <TouchSensor DEF='Touch'/><TimeSensor DEF='Clock'/>
+         <ROUTE fromNode='Touch' fromField='touchTime' toNode='Clock' toField='set_startTime'/>
+         <Shape><Appearance><ImageTexture url='\"a.png\"'/><Material/></Appearance><Box/></Shape>"))
     .unwrap();
     assert_eq!(s.report.unsupported.get("Text"), Some(&1));
-    assert_eq!(s.report.ignored.get("TimeSensor"), Some(&1));
-    assert!(
-        s.report
-            .unsupported
-            .keys()
-            .any(|k| k.starts_with("ImageTexture"))
-    );
+    assert_eq!(s.report.ignored.get("ROUTE from TouchSensor"), Some(&1), "{:?}", s.report.ignored);
+    assert!(s.report.unsupported.keys().any(|k| k.starts_with("ImageTexture")));
     assert_eq!(s.draws.len(), 1, "the box still draws, untextured");
 }
 
@@ -154,23 +127,10 @@ fn bad_shapes_are_skipped_unless_strict() {
     let lenient = parse_str(&doc).unwrap();
     assert_eq!(lenient.draws.len(), 1);
     assert_eq!(lenient.report.warnings.len(), 1);
-    assert!(
-        lenient.report.warnings[0].contains("`two` is not a number"),
-        "{:?}",
-        lenient.report.warnings
-    );
+    assert!(lenient.report.warnings[0].contains("`two` is not a number"), "{:?}", lenient.report.warnings);
 
-    let strict = x3d_scene::parse_str_with(
-        &doc,
-        &x3d_scene::LoadOptions {
-            strict: true,
-            ..Default::default()
-        },
-    );
-    assert!(
-        matches!(strict, Err(x3d_scene::Error::Field { line: 4, .. })),
-        "{strict:?}"
-    );
+    let strict = x3d_scene::parse_str_with(&doc, &x3d_scene::LoadOptions { strict: true, ..Default::default() });
+    assert!(matches!(strict, Err(x3d_scene::Error::Field { line: 4, .. })), "{strict:?}");
 }
 
 #[test]
@@ -193,10 +153,7 @@ fn elevation_grid_faces_up() {
     .unwrap();
     let m = &s.draws[0].mesh;
     assert_eq!(m.primitive_count(), 8);
-    assert!(
-        m.vertices.iter().all(|v| v.normal[1] > 0.0),
-        "normals point up"
-    );
+    assert!(m.vertices.iter().all(|v| v.normal[1] > 0.0), "normals point up");
 }
 
 #[test]
@@ -212,10 +169,7 @@ fn strips_and_fans() {
     for d in &s.draws {
         assert!(d.mesh.vertices.iter().all(|v| v.normal[2].abs() > 0.99));
         let n: Vec<f32> = d.mesh.vertices.iter().map(|v| v.normal[2]).collect();
-        assert!(
-            n.windows(2).all(|w| w[0] == w[1]),
-            "consistent facing: {n:?}"
-        );
+        assert!(n.windows(2).all(|w| w[0] == w[1]), "consistent facing: {n:?}");
     }
 }
 
@@ -227,8 +181,7 @@ fn gzipped_files_load() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("box.x3dz");
     let mut gz = flate2_writer(std::fs::File::create(&path).unwrap());
-    gz.write_all(x3d("<Shape><Box/></Shape>").as_bytes())
-        .unwrap();
+    gz.write_all(x3d("<Shape><Box/></Shape>").as_bytes()).unwrap();
     drop(gz);
     assert_eq!(x3d_scene::load(&path).unwrap().draws.len(), 1);
     std::fs::remove_dir_all(dir).ok();

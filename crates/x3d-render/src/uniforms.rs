@@ -32,37 +32,22 @@ const _: () = assert!(size_of::<GpuLight>() == 80);
 impl From<&Light> for GpuLight {
     fn from(l: &Light) -> Self {
         let (kind, position, direction, attenuation, radius, beam, cut) = match l.kind {
-            LightKind::Directional { direction } => {
-                (0.0, Vec3::ZERO, direction, Vec3::X, f32::MAX, 0.0, 0.0)
+            LightKind::Directional { direction } => (0.0, Vec3::ZERO, direction, Vec3::X, f32::MAX, 0.0, 0.0),
+            LightKind::Point { location, attenuation, radius } => {
+                (1.0, location, Vec3::NEG_Z, attenuation, radius, 0.0, 0.0)
             }
-            LightKind::Point {
-                location,
-                attenuation,
-                radius,
-            } => (1.0, location, Vec3::NEG_Z, attenuation, radius, 0.0, 0.0),
-            LightKind::Spot {
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            } => (
-                2.0,
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            ),
+            LightKind::Spot { location, direction, attenuation, radius, beam_width, cut_off_angle } => {
+                (2.0, location, direction, attenuation, radius, beam_width, cut_off_angle)
+            }
         };
         Self {
-            color_intensity: l.color.extend(l.intensity).into(),
+            // A light that is off keeps its slot (draws' light masks index by
+            // position) but contributes nothing.
+            color_intensity: l.color.extend(if l.on { l.intensity } else { 0.0 }).into(),
             position_kind: position.extend(kind).into(),
             direction_ambient: direction
                 .normalize_or(Vec3::NEG_Z)
-                .extend(l.ambient_intensity)
+                .extend(if l.on { l.ambient_intensity } else { 0.0 })
                 .into(),
             attenuation_radius: attenuation.extend(radius).into(),
             spot: [beam, cut, 0.0, 0.0],
@@ -79,9 +64,16 @@ pub struct FrameUniform {
     pub camera_pos: [f32; 4],
     pub params: [u32; 4],
     pub near_far: [f32; 4],
+    /// Target width and height in pixels, then the line/point size multiplier.
+    pub viewport: [f32; 4],
+    /// World → the sun's shadow-map clip space.
+    pub shadow_proj: [[f32; 4]; 4],
+    /// x: index of the shadow-casting light (−1 = no shadows), y: depth bias,
+    /// z: 1 / shadow-map size, w: one shadow texel in world units.
+    pub shadow: [f32; 4],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
-const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 3 + 80 * MAX_LIGHTS);
+const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 64 + 16 + 80 * MAX_LIGHTS);
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.
 #[repr(C)]
@@ -97,8 +89,10 @@ pub struct DrawUniform {
     pub flags: [u32; 4],
     /// x: bit *i* set = scene light *i* reaches this draw (X3D light scoping).
     pub light_mask: [u32; 4],
+    /// x: line width / point size in pixels.
+    pub line: [f32; 4],
 }
-const _: () = assert!(size_of::<DrawUniform>() == 64 * 3 + 16 * 6);
+const _: () = assert!(size_of::<DrawUniform>() == 64 * 3 + 16 * 7);
 
 /// Bits in `flags.w`: which texture slots hold a real texture.
 pub mod texture_bits {
@@ -111,24 +105,13 @@ pub mod texture_bits {
 
 impl DrawUniform {
     /// `textures`: bits from [`texture_bits`] for the slots that loaded.
-    pub fn new(
-        model: Mat4,
-        material: &Material,
-        vertex_colors: bool,
-        textures: u32,
-        light_mask: u32,
-    ) -> Self {
+    pub fn new(model: Mat4, material: &Material, vertex_colors: bool, textures: u32, light_mask: u32) -> Self {
         // 🎨 Normals must be transformed by the inverse-transpose of the
         // model matrix, or non-uniform scale bends them the wrong way.
         let normal_matrix = model.inverse().transpose();
-        let pbr = material.pbr.map_or([0.0, 1.0, 1.0, 1.0], |p| {
-            [
-                p.metallic,
-                p.roughness,
-                p.occlusion_strength,
-                p.normal_scale,
-            ]
-        });
+        let pbr = material
+            .pbr
+            .map_or([0.0, 1.0, 1.0, 1.0], |p| [p.metallic, p.roughness, p.occlusion_strength, p.normal_scale]);
         Self {
             model: model.to_cols_array_2d(),
             normal_matrix: normal_matrix.to_cols_array_2d(),
@@ -137,13 +120,9 @@ impl DrawUniform {
             emissive: material.emissive.extend(material.ambient_intensity).into(),
             specular: material.specular.extend(material.shininess).into(),
             pbr,
-            flags: [
-                u32::from(material.unlit),
-                u32::from(vertex_colors),
-                u32::from(material.pbr.is_some()),
-                textures,
-            ],
+            flags: [u32::from(material.unlit), u32::from(vertex_colors), u32::from(material.pbr.is_some()), textures],
             light_mask: [light_mask, 0, 0, 0],
+            line: [material.line_width, 0.0, 0.0, 0.0],
         }
     }
 }

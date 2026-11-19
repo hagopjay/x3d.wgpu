@@ -14,7 +14,7 @@ path = "src/main.rs"
 x3d-scene = { workspace = true, features = ["bytemuck"] }
 glam = { workspace = true }
 bytemuck = { workspace = true }
-wgpu = { workspace = true }
+wgpu = { workspace = true, features = ["naga-ir"] }
 pollster = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -23,6 +23,8 @@ env_logger = { workspace = true }
 clap = { workspace = true }
 image = { workspace = true }
 winit = { workspace = true, optional = true }
+# wgpu's own shader compiler: X3D ComposedShaders arrive as GLSL.
+naga = { version = "30", features = ["glsl-in", "wgsl-in"] }
 
 [features]
 # 🦀 `cargo build --no-default-features` gives a headless-only renderer
@@ -32,7 +34,3 @@ window = ["dep:winit"]
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-# wgpu's own shader compiler, used by a test to check struct layouts.
-naga = { version = "30", features = ["wgsl-in"] }

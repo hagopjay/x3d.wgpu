@@ -42,8 +42,7 @@ fn fs(in: Out) -> @location(0) vec4f {
 
 fn main() -> Result<()> {
     // 1. Instance → adapter → device + queue.
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
         .context("no GPU adapter (on a headless Linux box: apt install mesa-vulkan-drivers)")?;
     println!("adapter: {}", adapter.get_info().name);
@@ -53,11 +52,7 @@ fn main() -> Result<()> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("canvas"),
-        size: wgpu::Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -81,10 +76,7 @@ fn main() -> Result<()> {
             compilation_options: Default::default(),
             buffers: &[],
         },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
         depth_stencil: None,
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
@@ -107,12 +99,7 @@ fn main() -> Result<()> {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.08,
-                        g: 0.08,
-                        b: 0.1,
-                        a: 1.0,
-                    }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.1, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -139,25 +126,17 @@ fn main() -> Result<()> {
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: None,
-            },
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: None },
         },
         texture.size(),
     );
 
     // 6. Submit, wait, read.
     queue.submit([encoder.finish()]);
-    buffer
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map failed"));
     device.poll(wgpu::PollType::wait_indefinitely())?;
     let pixels = buffer.slice(..).get_mapped_range()?.to_vec();
-    image::RgbaImage::from_raw(SIZE, SIZE, pixels)
-        .context("wrong buffer size")?
-        .save("hello_triangle.png")?;
+    image::RgbaImage::from_raw(SIZE, SIZE, pixels).context("wrong buffer size")?.save("hello_triangle.png")?;
     println!("wrote hello_triangle.png");
     Ok(())
 }

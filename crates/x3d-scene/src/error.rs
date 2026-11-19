@@ -39,11 +39,7 @@ pub enum Error {
     },
 
     #[error("<{node}> on line {line}: {message}")]
-    Invalid {
-        node: String,
-        line: u32,
-        message: String,
-    },
+    Invalid { node: String, line: u32, message: String },
 
     #[error("USE='{0}' has no matching DEF")]
     MissingDef(String),

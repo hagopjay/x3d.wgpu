@@ -14,6 +14,7 @@ use std::sync::Arc;
 use glam::{Mat4, Quat, Vec3, Vec4};
 
 use crate::report::Report;
+use crate::runtime::{Animation, Offsets, TransformNode, Value};
 
 /// One vertex as the GPU sees it.
 ///
@@ -56,10 +57,7 @@ pub struct Aabb {
 
 impl Aabb {
     /// The "nothing" box: `min = +∞`, `max = −∞`, so any union replaces it.
-    pub const EMPTY: Self = Self {
-        min: Vec3::INFINITY,
-        max: Vec3::NEG_INFINITY,
-    };
+    pub const EMPTY: Self = Self { min: Vec3::INFINITY, max: Vec3::NEG_INFINITY };
 
     pub fn is_empty(&self) -> bool {
         self.min.cmpgt(self.max).any()
@@ -71,10 +69,7 @@ impl Aabb {
         self.max - self.min
     }
     pub fn union(self, other: Self) -> Self {
-        Self {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
+        Self { min: self.min.min(other.min), max: self.max.max(other.max) }
     }
     /// The box around this box after a transform (all 8 corners).
     pub fn transformed(&self, m: &Mat4) -> Self {
@@ -98,10 +93,7 @@ impl Aabb {
 /// 🦀 Implementing `FromIterator` lets you write `points.iter().collect::<Aabb>()`.
 impl FromIterator<Vec3> for Aabb {
     fn from_iter<I: IntoIterator<Item = Vec3>>(iter: I) -> Self {
-        iter.into_iter().fold(Self::EMPTY, |b, p| Self {
-            min: b.min.min(p),
-            max: b.max.max(p),
-        })
+        iter.into_iter().fold(Self::EMPTY, |b, p| Self { min: b.min.min(p), max: b.max.max(p) })
     }
 }
 
@@ -115,6 +107,9 @@ pub struct Mesh {
     pub solid: bool,
     /// The geometry carried its own colours (Color/ColorRGBA).
     pub has_colors: bool,
+    /// Its colours came from a ColorRGBA node: X_ITE then draws the shape
+    /// blended (as transparent), whatever the material says.
+    pub rgba_colors: bool,
     pub bounds: Aabb,
     /// For logs: the X3D node name and DEF, e.g. `IndexedFaceSet "Hull"`.
     pub label: String,
@@ -129,6 +124,7 @@ impl Mesh {
             indices,
             solid: true,
             has_colors: false,
+            rgba_colors: false,
             bounds,
             label: String::new(),
         }
@@ -151,12 +147,7 @@ impl Mesh {
         use std::collections::HashMap;
         let key = |v: &Vertex| -> [u32; 13] {
             let mut k = [0u32; 13];
-            let all = v
-                .position
-                .iter()
-                .chain(&v.normal)
-                .chain(&v.color)
-                .chain(&v.texcoord);
+            let all = v.position.iter().chain(&v.normal).chain(&v.color).chain(&v.texcoord);
             for (slot, f) in k.iter_mut().zip(all) {
                 *slot = f.to_bits();
             }
@@ -209,24 +200,11 @@ pub struct Textures {
 }
 
 impl Textures {
-    pub const NONE: Self = Self {
-        base: None,
-        normal: None,
-        metallic_roughness: None,
-        occlusion: None,
-        emissive: None,
-    };
+    pub const NONE: Self = Self { base: None, normal: None, metallic_roughness: None, occlusion: None, emissive: None };
 
     /// The slots in a fixed order (matches the renderer's bind group).
     pub fn slots(&self) -> [Option<&TextureRef>; 5] {
-        [
-            &self.base,
-            &self.normal,
-            &self.metallic_roughness,
-            &self.occlusion,
-            &self.emissive,
-        ]
-        .map(Option::as_ref)
+        [&self.base, &self.normal, &self.metallic_roughness, &self.occlusion, &self.emissive].map(Option::as_ref)
     }
     pub fn is_empty(&self) -> bool {
         self.slots().iter().all(Option::is_none)
@@ -265,6 +243,22 @@ pub struct Material {
     pub textures: Textures,
     /// TextureTransform / TextureTransformMatrix3D, applied to `Vertex::texcoord`.
     pub texture_matrix: Mat4,
+    /// Lines and points: width in pixels (LineProperties `linewidthScaleFactor`,
+    /// PointProperties `pointSizeScaleFactor`; X3D's nominal size is 1 px).
+    pub line_width: f32,
+    /// A ComposedShader replacing the built-in shading: index into [`Scene::shaders`].
+    pub shader: Option<u32>,
+}
+
+/// A ComposedShader (GLSL), as written in the file. The renderer translates it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderSource {
+    /// e.g. `ComposedShader "FacetShader"`.
+    pub label: String,
+    pub vertex: String,
+    pub fragment: String,
+    /// The shader's `<field>`s: name → index into [`Scene::shader_fields`].
+    pub fields: Vec<(String, u32)>,
 }
 
 impl Default for Material {
@@ -281,6 +275,8 @@ impl Default for Material {
             pbr: None,
             textures: Textures::NONE,
             texture_matrix: Mat4::IDENTITY,
+            line_width: 1.0,
+            shader: None,
         }
     }
 }
@@ -298,6 +294,8 @@ impl Material {
         pbr: None,
         textures: Textures::NONE,
         texture_matrix: Mat4::IDENTITY,
+        line_width: 1.0,
+        shader: None,
     };
 
     pub fn is_transparent(&self) -> bool {
@@ -314,10 +312,23 @@ pub struct Draw {
     pub material: Material,
     /// The light scopes (groups holding `global='false'` lights) this draw is inside.
     pub scopes: Arc<[u32]>,
+    /// The transform node this draw hangs from: `transform` is its world matrix.
+    pub node: u32,
+    /// Index into [`Scene::materials`]; `material` mirrors it, kept live by events.
+    pub material_id: u32,
+    /// Animated Switches above this draw, and which child it is in each.
+    pub switches: Arc<[SwitchGuard]>,
     /// The LOD levels this draw belongs to (outermost first). Empty for
     /// most draws. The renderer shows the draw only when, for every tag,
     /// the camera's distance picks that level.
     pub lod: Arc<[LodTag]>,
+}
+
+/// "This draw is under child `child` of Switch number `switch`."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchGuard {
+    pub switch: u32,
+    pub child: u32,
 }
 
 /// "This draw is level `level` of LOD number `group`."
@@ -389,6 +400,12 @@ pub struct Light {
     /// `global='false'` lights only light their own group: draws whose
     /// `scopes` contain this id. `None` lights everything.
     pub scope: Option<u32>,
+    /// `on='false'` (or switched off by an event).
+    pub on: bool,
+    /// The transform node the light sits under ([`Scene::nodes`]).
+    pub node: u32,
+    /// `kind` in the node's own space; `kind` is this placed in the world.
+    pub local: LightKind,
 }
 
 impl Light {
@@ -401,51 +418,52 @@ impl Light {
 impl Light {
     /// The same light seen through a transform (used when an Inline is placed).
     pub fn transformed(&self, m: &Mat4) -> Self {
-        let dir = |d: Vec3| m.transform_vector3(d).normalize_or(d);
-        let radius_scale = m.to_scale_rotation_translation().0.max_element();
-        let kind = match self.kind {
-            LightKind::Directional { direction } => LightKind::Directional {
-                direction: dir(direction),
-            },
-            LightKind::Point {
-                location,
-                attenuation,
-                radius,
-            } => LightKind::Point {
-                location: m.transform_point3(location),
-                attenuation,
-                radius: radius * radius_scale,
-            },
-            LightKind::Spot {
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            } => LightKind::Spot {
-                location: m.transform_point3(location),
-                direction: dir(direction),
-                attenuation,
-                radius: radius * radius_scale,
-                beam_width,
-                cut_off_angle,
-            },
-        };
-        Self { kind, ..*self }
+        Self { kind: self.kind.transformed(m), ..*self }
     }
 
+    /// `local` placed by a node's world matrix.
+    pub fn local_in(&self, m: &Mat4) -> LightKind {
+        self.local.transformed(m)
+    }
+}
+
+impl LightKind {
+    /// The same light seen through a transform.
+    pub fn transformed(&self, m: &Mat4) -> Self {
+        let dir = |d: Vec3| m.transform_vector3(d).normalize_or(d);
+        let radius_scale = m.to_scale_rotation_translation().0.max_element();
+        match *self {
+            LightKind::Directional { direction } => LightKind::Directional { direction: dir(direction) },
+            LightKind::Point { location, attenuation, radius } => {
+                LightKind::Point { location: m.transform_point3(location), attenuation, radius: radius * radius_scale }
+            }
+            LightKind::Spot { location, direction, attenuation, radius, beam_width, cut_off_angle } => {
+                LightKind::Spot {
+                    location: m.transform_point3(location),
+                    direction: dir(direction),
+                    attenuation,
+                    radius: radius * radius_scale,
+                    beam_width,
+                    cut_off_angle,
+                }
+            }
+        }
+    }
+}
+
+impl Light {
     /// The NavigationInfo headlight: a white directional light along the
     /// camera's view direction.
     pub fn headlight(view_direction: Vec3) -> Self {
         Self {
-            kind: LightKind::Directional {
-                direction: view_direction,
-            },
+            kind: LightKind::Directional { direction: view_direction },
             color: Vec3::ONE,
             intensity: 1.0,
             ambient_intensity: 0.0,
             scope: None,
+            on: true,
+            node: 0,
+            local: LightKind::Directional { direction: view_direction },
         }
     }
 }
@@ -527,34 +545,68 @@ pub struct Scene {
     pub lod_groups: u32,
     /// How many light scopes the lights and draws refer to.
     pub light_scopes: u32,
+
+    // --- the live part (see `runtime`) ---
+    /// The transform tree; node 0 is the root. Parents come before children.
+    pub nodes: Vec<TransformNode>,
+    /// Every distinct material; draws refer to them by `material_id`.
+    pub materials: Vec<crate::Material>,
+    /// `whichChoice` of each Switch that events can change.
+    pub switches: Vec<i32>,
+    /// ComposedShaders; materials refer to them by index.
+    pub shaders: Vec<ShaderSource>,
+    /// Current values of ComposedShader fields (events can change them).
+    pub shader_fields: Vec<Value>,
+    /// TimeSensors, interpolators and ROUTEs.
+    pub animation: Animation,
 }
 
 impl Scene {
     /// Add an inlined scene's contents, placed by `m`. Its Background and
     /// NavigationInfo don't bind (X3D: only the main scene's do).
     /// `scopes`: the light scopes the Inline itself sits in.
-    pub fn splice(&mut self, child: &Scene, m: Mat4, scopes: &[u32], from: &str) {
+    pub fn splice(&mut self, child: &Scene, m: Mat4, parent_node: u32, scopes: &[u32], from: &str) {
         let scope_offset = self.light_scopes;
-        // LOD groups are numbered per scene: shift the child's past ours, and
-        // move their centres along with everything else.
-        let offset = self.lod_groups;
+        let lod_offset = self.lod_groups;
+        let o = Offsets {
+            nodes: self.nodes.len() as u32,
+            materials: self.materials.len() as u32,
+            lights: self.lights.len() as u32,
+            switches: self.switches.len() as u32,
+            shader_fields: self.shader_fields.len() as u32,
+        };
+        let shader_offset = self.shaders.len() as u32;
+        // The child's root hangs under the Inline's node; its other nodes keep
+        // their parents, renumbered.
+        self.nodes.extend(child.nodes.iter().map(|n| TransformNode {
+            parent: Some(n.parent.map_or(parent_node, |p| p + o.nodes)),
+            world: m * n.world,
+            ..*n
+        }));
+        let shift_shader =
+            |m: &crate::Material| crate::Material { shader: m.shader.map(|s| s + shader_offset), ..m.clone() };
+        self.materials.extend(child.materials.iter().map(shift_shader));
+        self.shaders.extend(child.shaders.iter().map(|s| ShaderSource {
+            fields: s.fields.iter().map(|(n, i)| (n.clone(), i + o.shader_fields)).collect(),
+            ..s.clone()
+        }));
+        self.switches.extend(child.switches.iter().copied());
+        self.shader_fields.extend(child.shader_fields.iter().copied());
         self.draws.extend(child.draws.iter().map(|d| {
             Draw {
                 transform: m * d.transform,
+                node: d.node + o.nodes,
+                material: shift_shader(&d.material),
+                material_id: d.material_id + o.materials,
+                switches: d.switches.iter().map(|g| SwitchGuard { switch: g.switch + o.switches, ..*g }).collect(),
+                // LOD groups are numbered per scene: shift the child's past ours, and
+                // move their centres along with everything else.
                 lod: d
                     .lod
                     .iter()
-                    .map(|t| LodTag {
-                        group: t.group + offset,
-                        center: m.transform_point3(t.center),
-                        ..t.clone()
-                    })
+                    .map(|t| LodTag { group: t.group + lod_offset, center: m.transform_point3(t.center), ..t.clone() })
                     .collect(),
-                scopes: scopes
-                    .iter()
-                    .copied()
-                    .chain(d.scopes.iter().map(|s| s + scope_offset))
-                    .collect(),
+                scopes: scopes.iter().copied().chain(d.scopes.iter().map(|s| s + scope_offset)).collect(),
                 ..d.clone()
             }
         }));
@@ -562,25 +614,23 @@ impl Scene {
         self.light_scopes += child.light_scopes;
         self.lights.extend(child.lights.iter().map(|l| Light {
             scope: l.scope.map(|s| s + scope_offset),
+            node: l.node + o.nodes,
             ..l.transformed(&m)
         }));
+        self.animation.absorb(&child.animation, &o);
         let (_, rotation, _) = m.to_scale_rotation_translation();
-        self.viewpoints
-            .extend(child.viewpoints.iter().map(|v| Viewpoint {
-                position: m.transform_point3(v.position),
-                orientation: rotation * v.orientation,
-                center_of_rotation: m.transform_point3(v.center_of_rotation),
-                ..v.clone()
-            }));
+        self.viewpoints.extend(child.viewpoints.iter().map(|v| Viewpoint {
+            position: m.transform_point3(v.position),
+            orientation: rotation * v.orientation,
+            center_of_rotation: m.transform_point3(v.center_of_rotation),
+            ..v.clone()
+        }));
         self.report.absorb(&child.report, from);
     }
 
     /// The world-space box around every draw.
     pub fn bounds(&self) -> Aabb {
-        self.draws
-            .iter()
-            .map(Draw::world_bounds)
-            .fold(Aabb::EMPTY, Aabb::union)
+        self.draws.iter().map(Draw::world_bounds).fold(Aabb::EMPTY, Aabb::union)
     }
 
     /// Unique meshes (by pointer), in first-use order.
@@ -610,12 +660,7 @@ mod tests {
 
     #[test]
     fn weld_merges_duplicates() {
-        let v = Vertex {
-            position: [0.0; 3],
-            normal: [0.0, 0.0, 1.0],
-            color: [1.0; 4],
-            texcoord: [0.0; 3],
-        };
+        let v = Vertex { position: [0.0; 3], normal: [0.0, 0.0, 1.0], color: [1.0; 4], texcoord: [0.0; 3] };
         let mut m = Mesh::new(Topology::Triangles, vec![v, v, v], vec![0, 1, 2]);
         m.weld();
         assert_eq!(m.vertices.len(), 1);
