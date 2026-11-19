@@ -21,11 +21,7 @@ use x3d_render::{Backend, ColorMode, DebugView, Gpu, RenderSettings, Shot};
 use x3d_scene::LoadOptions;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "x3d-view",
-    version,
-    about = "A wgpu (Vulkan) renderer for X3D scenes"
-)]
+#[command(name = "x3d-view", version, about = "A wgpu (Vulkan) renderer for X3D scenes")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -74,6 +70,13 @@ enum Command {
         /// Also load Inlines marked load='false'.
         #[arg(long)]
         load_all_inlines: bool,
+    },
+    /// Translate and compile every ComposedShader in a file; show what fails and why.
+    Shaders {
+        file: PathBuf,
+        /// Print the translated GLSL 4.50 too.
+        #[arg(long)]
+        show: bool,
     },
     /// List the GPU adapters wgpu can see.
     Adapters {
@@ -144,11 +147,7 @@ impl Common {
         }
     }
     fn load_options(&self) -> LoadOptions {
-        LoadOptions {
-            segments: self.segments,
-            strict: self.strict,
-            load_all_inlines: self.load_all_inlines,
-        }
+        LoadOptions { segments: self.segments, strict: self.strict, load_all_inlines: self.load_all_inlines }
     }
 }
 
@@ -160,9 +159,7 @@ struct Size(u32, u32);
 impl FromStr for Size {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (w, h) = s
-            .split_once(['x', 'X', '×'])
-            .ok_or("expected WIDTHxHEIGHT, e.g. 1280x720")?;
+        let (w, h) = s.split_once(['x', 'X', '×']).ok_or("expected WIDTHxHEIGHT, e.g. 1280x720")?;
         let parse = |v: &str| v.trim().parse::<u32>().map_err(|e| format!("`{v}`: {e}"));
         match (parse(w)?, parse(h)?) {
             (0, _) | (_, 0) => Err("width and height must be > 0".into()),
@@ -177,35 +174,29 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         #[cfg(feature = "window")]
-        Command::View {
-            file,
-            shader,
-            screenshot,
-            exit_after,
-            common,
-        } => x3d_render::viewer::run(x3d_render::viewer::ViewerOptions {
-            scene: file,
-            shader,
-            backend: common.backend,
-            msaa: common.msaa,
-            size: (common.size.0, common.size.1),
-            settings: common.settings(),
-            load: common.load_options(),
-            screenshot,
-            exit_after,
-        }),
-        Command::Render {
-            file,
-            output,
-            viewpoint,
-            sheet,
-            time,
-            common,
-        } => {
+        Command::View { file, shader, screenshot, exit_after, common } => {
+            x3d_render::viewer::run(x3d_render::viewer::ViewerOptions {
+                scene: file,
+                shader,
+                backend: common.backend,
+                msaa: common.msaa,
+                size: (common.size.0, common.size.1),
+                settings: common.settings(),
+                load: common.load_options(),
+                screenshot,
+                exit_after,
+            })
+        }
+        Command::Render { file, output, viewpoint, sheet, time, common } => {
             let t0 = Instant::now();
             let mut scene = x3d_scene::load_with(&file, &common.load_options())
                 .with_context(|| format!("loading {}", file.display()))?;
             // Like a browser's first frame: animations show their state at `time`.
+            scene.advance(0.0); // load: the first Viewpoint is bound, intros start
+            if let Some(i) = viewpoint {
+                scene.bind_viewpoint(i);
+                scene.advance(0.0);
+            }
             scene.advance(time);
             let t_load = t0.elapsed();
             if !scene.report.is_lossless() {
@@ -213,10 +204,7 @@ fn main() -> Result<()> {
             }
             if let Some(i) = viewpoint {
                 if i >= scene.viewpoints.len() {
-                    bail!(
-                        "viewpoint {i} doesn't exist; the scene has {}",
-                        scene.viewpoints.len()
-                    );
+                    bail!("viewpoint {i} doesn't exist; the scene has {}", scene.viewpoints.len());
                 }
             }
             let gpu = Gpu::headless(common.backend)?;
@@ -233,9 +221,7 @@ fn main() -> Result<()> {
                 x3d_render::render_scene(&gpu, &scene, &shot)?
             };
             let t_render = t1.elapsed();
-            image
-                .save(&output)
-                .with_context(|| format!("writing {}", output.display()))?;
+            image.save(&output).with_context(|| format!("writing {}", output.display()))?;
             println!(
                 "{} → {} ({}×{}) on {} — load {:.1} ms, render+readback {:.1} ms",
                 file.display(),
@@ -248,24 +234,11 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Info {
-            file,
-            shapes,
-            load_all_inlines,
-        } => {
+        Command::Info { file, shapes, load_all_inlines } => {
             let t0 = Instant::now();
-            let opts = LoadOptions {
-                load_all_inlines,
-                ..Default::default()
-            };
-            let scene = x3d_scene::load_with(&file, &opts)
-                .with_context(|| format!("loading {}", file.display()))?;
-            println!(
-                "── {} ── loaded in {:.0} ms\n{}",
-                file.display(),
-                t0.elapsed().as_secs_f64() * 1e3,
-                scene.report
-            );
+            let opts = LoadOptions { load_all_inlines, ..Default::default() };
+            let scene = x3d_scene::load_with(&file, &opts).with_context(|| format!("loading {}", file.display()))?;
+            println!("── {} ── loaded in {:.0} ms\n{}", file.display(), t0.elapsed().as_secs_f64() * 1e3, scene.report);
             let b = scene.bounds();
             if !b.is_empty() {
                 println!("bounds {:.3} … {:.3} (size {:.3})", b.min, b.max, b.size());
@@ -291,6 +264,43 @@ fn main() -> Result<()> {
                         d.world_bounds().center()
                     );
                 }
+            }
+            Ok(())
+        }
+        Command::Shaders { file, show } => {
+            let scene = x3d_scene::load(&file).with_context(|| format!("loading {}", file.display()))?;
+            let mut failed = 0;
+            for (i, shader) in scene.shaders.iter().enumerate() {
+                // A shader drawn on a PointSet needs the sprite version.
+                let sprites = scene
+                    .draws
+                    .iter()
+                    .any(|d| d.material.shader == Some(i as u32) && d.mesh.topology == x3d_scene::Topology::Points);
+                match x3d_render::custom::compile(shader, sprites) {
+                    Ok(c) => {
+                        let names: Vec<&str> = c.block.members.iter().map(|m| m.name.as_str()).collect();
+                        println!(
+                            "✔ {}{}: {} uniforms ({})",
+                            shader.label,
+                            if sprites { " [sprites]" } else { "" },
+                            names.len(),
+                            names.join(", ")
+                        );
+                        if show {
+                            println!(
+                                "--- vertex ---\n{}\n--- fragment ---\n{}",
+                                c.translated.vertex, c.translated.fragment
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        println!("✘ {}{}:\n{e}", shader.label, if sprites { " [sprites]" } else { "" });
+                    }
+                }
+            }
+            if failed > 0 {
+                bail!("{failed} of {} shaders failed", scene.shaders.len());
             }
             Ok(())
         }

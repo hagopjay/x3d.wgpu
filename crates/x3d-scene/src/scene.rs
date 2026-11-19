@@ -57,10 +57,7 @@ pub struct Aabb {
 
 impl Aabb {
     /// The "nothing" box: `min = +∞`, `max = −∞`, so any union replaces it.
-    pub const EMPTY: Self = Self {
-        min: Vec3::INFINITY,
-        max: Vec3::NEG_INFINITY,
-    };
+    pub const EMPTY: Self = Self { min: Vec3::INFINITY, max: Vec3::NEG_INFINITY };
 
     pub fn is_empty(&self) -> bool {
         self.min.cmpgt(self.max).any()
@@ -72,10 +69,7 @@ impl Aabb {
         self.max - self.min
     }
     pub fn union(self, other: Self) -> Self {
-        Self {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
+        Self { min: self.min.min(other.min), max: self.max.max(other.max) }
     }
     /// The box around this box after a transform (all 8 corners).
     pub fn transformed(&self, m: &Mat4) -> Self {
@@ -99,10 +93,7 @@ impl Aabb {
 /// 🦀 Implementing `FromIterator` lets you write `points.iter().collect::<Aabb>()`.
 impl FromIterator<Vec3> for Aabb {
     fn from_iter<I: IntoIterator<Item = Vec3>>(iter: I) -> Self {
-        iter.into_iter().fold(Self::EMPTY, |b, p| Self {
-            min: b.min.min(p),
-            max: b.max.max(p),
-        })
+        iter.into_iter().fold(Self::EMPTY, |b, p| Self { min: b.min.min(p), max: b.max.max(p) })
     }
 }
 
@@ -116,6 +107,9 @@ pub struct Mesh {
     pub solid: bool,
     /// The geometry carried its own colours (Color/ColorRGBA).
     pub has_colors: bool,
+    /// Its colours came from a ColorRGBA node: X_ITE then draws the shape
+    /// blended (as transparent), whatever the material says.
+    pub rgba_colors: bool,
     pub bounds: Aabb,
     /// For logs: the X3D node name and DEF, e.g. `IndexedFaceSet "Hull"`.
     pub label: String,
@@ -130,6 +124,7 @@ impl Mesh {
             indices,
             solid: true,
             has_colors: false,
+            rgba_colors: false,
             bounds,
             label: String::new(),
         }
@@ -152,12 +147,7 @@ impl Mesh {
         use std::collections::HashMap;
         let key = |v: &Vertex| -> [u32; 13] {
             let mut k = [0u32; 13];
-            let all = v
-                .position
-                .iter()
-                .chain(&v.normal)
-                .chain(&v.color)
-                .chain(&v.texcoord);
+            let all = v.position.iter().chain(&v.normal).chain(&v.color).chain(&v.texcoord);
             for (slot, f) in k.iter_mut().zip(all) {
                 *slot = f.to_bits();
             }
@@ -210,24 +200,11 @@ pub struct Textures {
 }
 
 impl Textures {
-    pub const NONE: Self = Self {
-        base: None,
-        normal: None,
-        metallic_roughness: None,
-        occlusion: None,
-        emissive: None,
-    };
+    pub const NONE: Self = Self { base: None, normal: None, metallic_roughness: None, occlusion: None, emissive: None };
 
     /// The slots in a fixed order (matches the renderer's bind group).
     pub fn slots(&self) -> [Option<&TextureRef>; 5] {
-        [
-            &self.base,
-            &self.normal,
-            &self.metallic_roughness,
-            &self.occlusion,
-            &self.emissive,
-        ]
-        .map(Option::as_ref)
+        [&self.base, &self.normal, &self.metallic_roughness, &self.occlusion, &self.emissive].map(Option::as_ref)
     }
     pub fn is_empty(&self) -> bool {
         self.slots().iter().all(Option::is_none)
@@ -269,6 +246,19 @@ pub struct Material {
     /// Lines and points: width in pixels (LineProperties `linewidthScaleFactor`,
     /// PointProperties `pointSizeScaleFactor`; X3D's nominal size is 1 px).
     pub line_width: f32,
+    /// A ComposedShader replacing the built-in shading: index into [`Scene::shaders`].
+    pub shader: Option<u32>,
+}
+
+/// A ComposedShader (GLSL), as written in the file. The renderer translates it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderSource {
+    /// e.g. `ComposedShader "FacetShader"`.
+    pub label: String,
+    pub vertex: String,
+    pub fragment: String,
+    /// The shader's `<field>`s: name → index into [`Scene::shader_fields`].
+    pub fields: Vec<(String, u32)>,
 }
 
 impl Default for Material {
@@ -286,6 +276,7 @@ impl Default for Material {
             textures: Textures::NONE,
             texture_matrix: Mat4::IDENTITY,
             line_width: 1.0,
+            shader: None,
         }
     }
 }
@@ -304,6 +295,7 @@ impl Material {
         textures: Textures::NONE,
         texture_matrix: Mat4::IDENTITY,
         line_width: 1.0,
+        shader: None,
     };
 
     pub fn is_transparent(&self) -> bool {
@@ -426,10 +418,7 @@ impl Light {
 impl Light {
     /// The same light seen through a transform (used when an Inline is placed).
     pub fn transformed(&self, m: &Mat4) -> Self {
-        Self {
-            kind: self.kind.transformed(m),
-            ..*self
-        }
+        Self { kind: self.kind.transformed(m), ..*self }
     }
 
     /// `local` placed by a node's world matrix.
@@ -444,33 +433,20 @@ impl LightKind {
         let dir = |d: Vec3| m.transform_vector3(d).normalize_or(d);
         let radius_scale = m.to_scale_rotation_translation().0.max_element();
         match *self {
-            LightKind::Directional { direction } => LightKind::Directional {
-                direction: dir(direction),
-            },
-            LightKind::Point {
-                location,
-                attenuation,
-                radius,
-            } => LightKind::Point {
-                location: m.transform_point3(location),
-                attenuation,
-                radius: radius * radius_scale,
-            },
-            LightKind::Spot {
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            } => LightKind::Spot {
-                location: m.transform_point3(location),
-                direction: dir(direction),
-                attenuation,
-                radius: radius * radius_scale,
-                beam_width,
-                cut_off_angle,
-            },
+            LightKind::Directional { direction } => LightKind::Directional { direction: dir(direction) },
+            LightKind::Point { location, attenuation, radius } => {
+                LightKind::Point { location: m.transform_point3(location), attenuation, radius: radius * radius_scale }
+            }
+            LightKind::Spot { location, direction, attenuation, radius, beam_width, cut_off_angle } => {
+                LightKind::Spot {
+                    location: m.transform_point3(location),
+                    direction: dir(direction),
+                    attenuation,
+                    radius: radius * radius_scale,
+                    beam_width,
+                    cut_off_angle,
+                }
+            }
         }
     }
 }
@@ -480,18 +456,14 @@ impl Light {
     /// camera's view direction.
     pub fn headlight(view_direction: Vec3) -> Self {
         Self {
-            kind: LightKind::Directional {
-                direction: view_direction,
-            },
+            kind: LightKind::Directional { direction: view_direction },
             color: Vec3::ONE,
             intensity: 1.0,
             ambient_intensity: 0.0,
             scope: None,
             on: true,
             node: 0,
-            local: LightKind::Directional {
-                direction: view_direction,
-            },
+            local: LightKind::Directional { direction: view_direction },
         }
     }
 }
@@ -581,7 +553,9 @@ pub struct Scene {
     pub materials: Vec<crate::Material>,
     /// `whichChoice` of each Switch that events can change.
     pub switches: Vec<i32>,
-    /// Current values of ComposedShader fields that events can change.
+    /// ComposedShaders; materials refer to them by index.
+    pub shaders: Vec<ShaderSource>,
+    /// Current values of ComposedShader fields (events can change them).
     pub shader_fields: Vec<Value>,
     /// TimeSensors, interpolators and ROUTEs.
     pub animation: Animation,
@@ -601,6 +575,7 @@ impl Scene {
             switches: self.switches.len() as u32,
             shader_fields: self.shader_fields.len() as u32,
         };
+        let shader_offset = self.shaders.len() as u32;
         // The child's root hangs under the Inline's node; its other nodes keep
         // their parents, renumbered.
         self.nodes.extend(child.nodes.iter().map(|n| TransformNode {
@@ -608,39 +583,30 @@ impl Scene {
             world: m * n.world,
             ..*n
         }));
-        self.materials.extend(child.materials.iter().cloned());
+        let shift_shader =
+            |m: &crate::Material| crate::Material { shader: m.shader.map(|s| s + shader_offset), ..m.clone() };
+        self.materials.extend(child.materials.iter().map(shift_shader));
+        self.shaders.extend(child.shaders.iter().map(|s| ShaderSource {
+            fields: s.fields.iter().map(|(n, i)| (n.clone(), i + o.shader_fields)).collect(),
+            ..s.clone()
+        }));
         self.switches.extend(child.switches.iter().copied());
-        self.shader_fields
-            .extend(child.shader_fields.iter().copied());
+        self.shader_fields.extend(child.shader_fields.iter().copied());
         self.draws.extend(child.draws.iter().map(|d| {
             Draw {
                 transform: m * d.transform,
                 node: d.node + o.nodes,
+                material: shift_shader(&d.material),
                 material_id: d.material_id + o.materials,
-                switches: d
-                    .switches
-                    .iter()
-                    .map(|g| SwitchGuard {
-                        switch: g.switch + o.switches,
-                        ..*g
-                    })
-                    .collect(),
+                switches: d.switches.iter().map(|g| SwitchGuard { switch: g.switch + o.switches, ..*g }).collect(),
                 // LOD groups are numbered per scene: shift the child's past ours, and
                 // move their centres along with everything else.
                 lod: d
                     .lod
                     .iter()
-                    .map(|t| LodTag {
-                        group: t.group + lod_offset,
-                        center: m.transform_point3(t.center),
-                        ..t.clone()
-                    })
+                    .map(|t| LodTag { group: t.group + lod_offset, center: m.transform_point3(t.center), ..t.clone() })
                     .collect(),
-                scopes: scopes
-                    .iter()
-                    .copied()
-                    .chain(d.scopes.iter().map(|s| s + scope_offset))
-                    .collect(),
+                scopes: scopes.iter().copied().chain(d.scopes.iter().map(|s| s + scope_offset)).collect(),
                 ..d.clone()
             }
         }));
@@ -653,22 +619,18 @@ impl Scene {
         }));
         self.animation.absorb(&child.animation, &o);
         let (_, rotation, _) = m.to_scale_rotation_translation();
-        self.viewpoints
-            .extend(child.viewpoints.iter().map(|v| Viewpoint {
-                position: m.transform_point3(v.position),
-                orientation: rotation * v.orientation,
-                center_of_rotation: m.transform_point3(v.center_of_rotation),
-                ..v.clone()
-            }));
+        self.viewpoints.extend(child.viewpoints.iter().map(|v| Viewpoint {
+            position: m.transform_point3(v.position),
+            orientation: rotation * v.orientation,
+            center_of_rotation: m.transform_point3(v.center_of_rotation),
+            ..v.clone()
+        }));
         self.report.absorb(&child.report, from);
     }
 
     /// The world-space box around every draw.
     pub fn bounds(&self) -> Aabb {
-        self.draws
-            .iter()
-            .map(Draw::world_bounds)
-            .fold(Aabb::EMPTY, Aabb::union)
+        self.draws.iter().map(Draw::world_bounds).fold(Aabb::EMPTY, Aabb::union)
     }
 
     /// Unique meshes (by pointer), in first-use order.
@@ -698,12 +660,7 @@ mod tests {
 
     #[test]
     fn weld_merges_duplicates() {
-        let v = Vertex {
-            position: [0.0; 3],
-            normal: [0.0, 0.0, 1.0],
-            color: [1.0; 4],
-            texcoord: [0.0; 3],
-        };
+        let v = Vertex { position: [0.0; 3], normal: [0.0, 0.0, 1.0], color: [1.0; 4], texcoord: [0.0; 3] };
         let mut m = Mesh::new(Topology::Triangles, vec![v, v, v], vec![0, 1, 2]);
         m.weld();
         assert_eq!(m.vertices.len(), 1);

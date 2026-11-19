@@ -56,10 +56,7 @@ fn inline_places_the_other_file_under_the_transform() {
     );
     let s = load(&main).unwrap();
     let origins: Vec<Vec3> = s.draws.iter().map(|d| origin_of(&d.transform)).collect();
-    assert_eq!(
-        origins,
-        [Vec3::new(10.0, 1.0, 0.0), Vec3::new(-10.0, 1.0, 0.0)]
-    );
+    assert_eq!(origins, [Vec3::new(10.0, 1.0, 0.0), Vec3::new(-10.0, 1.0, 0.0)]);
     // Same file twice → parsed once → the mesh is shared.
     assert!(std::sync::Arc::ptr_eq(&s.draws[0].mesh, &s.draws[1].mesh));
     assert_eq!(s.lights.len(), 2, "the inlined light comes along, moved");
@@ -74,30 +71,11 @@ fn inline_cycles_and_load_false() {
     let lazy = dir.write("lazy.x3d", "<Inline load='false' url='\"a.x3d\"'/>");
 
     let s = load(dir.0.join("a.x3d")).unwrap();
-    assert_eq!(
-        s.draws.len(),
-        2,
-        "a's box and b's cone, then the cycle stops"
-    );
-    assert!(
-        s.report.warnings.iter().any(|w| w.contains("cycle")),
-        "{:?}",
-        s.report.warnings
-    );
+    assert_eq!(s.draws.len(), 2, "a's box and b's cone, then the cycle stops");
+    assert!(s.report.warnings.iter().any(|w| w.contains("cycle")), "{:?}", s.report.warnings);
 
-    assert_eq!(
-        load(&lazy).unwrap().draws.len(),
-        0,
-        "load='false' is honoured"
-    );
-    let eager = load_with(
-        &lazy,
-        &LoadOptions {
-            load_all_inlines: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    assert_eq!(load(&lazy).unwrap().draws.len(), 0, "load='false' is honoured");
+    let eager = load_with(&lazy, &LoadOptions { load_all_inlines: true, ..Default::default() }).unwrap();
     assert_eq!(eager.draws.len(), 2);
 }
 
@@ -122,10 +100,7 @@ fn physical_material_texture_slots_follow_container_field() {
     let s = load(&main).unwrap();
     let m = &s.draws[0].material;
     let pbr = m.pbr.expect("PhysicalMaterial → pbr");
-    assert_eq!(
-        (pbr.metallic, pbr.roughness, pbr.normal_scale),
-        (0.0, 0.9, 0.5)
-    );
+    assert_eq!((pbr.metallic, pbr.roughness, pbr.normal_scale), (0.0, 0.9, 0.5));
     let path = |t: &Option<x3d_scene::TextureRef>| t.as_ref().map(|t| t.path.clone());
     let canon = |p: &Path| Some(p.canonicalize().unwrap());
     assert_eq!(path(&m.textures.base), canon(&albedo));
@@ -162,10 +137,7 @@ fn coord_texture_generation_goes_through_the_column_major_matrix() {
             [t.x, t.y]
         })
         .collect();
-    assert!(
-        st.contains(&[2.0, 3.0]) && st.contains(&[3.0, 3.0]) && st.contains(&[2.0, 4.0]),
-        "{st:?}"
-    );
+    assert!(st.contains(&[2.0, 3.0]) && st.contains(&[3.0, 3.0]) && st.contains(&[2.0, 4.0]), "{st:?}");
 }
 
 #[test]
@@ -205,22 +177,9 @@ fn default_texture_mapping_uses_the_two_longest_sides() {
            <Coordinate point='0 0 0  4 0 0  4 2 0  0 2 0'/></IndexedFaceSet></Shape></Scene></X3D>",
     )
     .unwrap();
-    let mut st: Vec<[f32; 3]> = s.draws[0]
-        .mesh
-        .vertices
-        .iter()
-        .map(|v| v.texcoord)
-        .collect();
+    let mut st: Vec<[f32; 3]> = s.draws[0].mesh.vertices.iter().map(|v| v.texcoord).collect();
     st.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(
-        st,
-        [
-            [0.0, 0.0, 0.0],
-            [0.0, 0.5, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 0.5, 0.0]
-        ]
-    );
+    assert_eq!(st, [[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [1.0, 0.0, 0.0], [1.0, 0.5, 0.0]]);
 }
 
 #[test]
@@ -235,10 +194,7 @@ fn lod_keeps_every_level_and_tags_it() {
     assert_eq!(s.draws.len(), 1);
     let tag = &s.draws[0].lod[0];
     assert_eq!((tag.level, tag.center), (2, Vec3::new(0.0, 70.0, 0.0)));
-    assert!(
-        tag.active(Vec3::new(0.0, 0.0, 500.0)),
-        "far away → level 2 is shown"
-    );
+    assert!(tag.active(Vec3::new(0.0, 0.0, 500.0)), "far away → level 2 is shown");
 }
 
 #[test]
@@ -262,8 +218,5 @@ fn scoped_lights_only_reach_their_group() {
     assert!(sun.reaches(&sphere.scopes) && sun.reaches(&shaft_box.scopes));
     // The torch lights only its own group inside the inlined file.
     assert!(torch.reaches(&shaft_box.scopes));
-    assert!(
-        !torch.reaches(&sphere.scopes),
-        "the torch must not light the sphere"
-    );
+    assert!(!torch.reaches(&sphere.scopes), "the torch must not light the sphere");
 }

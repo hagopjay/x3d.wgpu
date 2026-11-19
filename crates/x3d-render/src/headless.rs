@@ -38,11 +38,7 @@ impl Offscreen {
     pub fn new(device: &wgpu::Device, size: (u32, u32), format: wgpu::TextureFormat) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -51,11 +47,7 @@ impl Offscreen {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        Self {
-            texture,
-            view,
-            size,
-        }
+        Self { texture, view, size }
     }
 
     pub fn read(&self, gpu: &Gpu) -> Result<RgbaImage, ReadbackError> {
@@ -92,17 +84,9 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture) -> Result<RgbaImage, Rea
         },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(h),
-            },
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
         },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
     gpu.queue.submit([encoder.finish()]);
 
@@ -117,9 +101,7 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture) -> Result<RgbaImage, Rea
 
     let mut pixels = Vec::with_capacity((unpadded * h) as usize);
     {
-        let data = slice
-            .get_mapped_range()
-            .map_err(|_| ReadbackError::NoCallback)?;
+        let data = slice.get_mapped_range().map_err(|_| ReadbackError::NoCallback)?;
         for row in data.chunks_exact(padded as usize) {
             pixels.extend_from_slice(&row[..unpadded as usize]);
         }
@@ -145,12 +127,7 @@ pub struct Shot {
 
 impl Default for Shot {
     fn default() -> Self {
-        Self {
-            size: (1280, 720),
-            msaa: 4,
-            settings: RenderSettings::default(),
-            viewpoint: None,
-        }
+        Self { size: (1280, 720), msaa: 4, settings: RenderSettings::default(), viewpoint: None }
     }
 }
 
@@ -184,18 +161,10 @@ pub fn render_sheet(gpu: &Gpu, scene: &Scene, shot: &Shot) -> Result<RgbaImage, 
     let camera = camera_for(scene, shot.viewpoint);
     let target = Offscreen::new(&gpu.device, shot.size, renderer.color_format());
     for (i, view) in DebugView::ALL.into_iter().enumerate() {
-        let settings = RenderSettings {
-            view,
-            ..shot.settings
-        };
+        let settings = RenderSettings { view, ..shot.settings };
         renderer.render(&target.view, shot.size, &camera, &settings);
         let tile = target.read(gpu)?;
-        image::imageops::replace(
-            &mut sheet,
-            &tile,
-            i64::from(w) * (i as i64 % 4),
-            i64::from(h) * (i as i64 / 4),
-        );
+        image::imageops::replace(&mut sheet, &tile, i64::from(w) * (i as i64 % 4), i64::from(h) * (i as i64 / 4));
     }
     Ok(sheet)
 }

@@ -60,14 +60,7 @@ pub fn split_at_minus_one(index: &[i32]) -> Vec<Vec<i32>> {
 
 /// Look up `values[i]` for an X3D (signed) index, with a helpful error.
 fn get<T: Copy>(values: &[T], i: i64, what: &'static str) -> Result<T, IndexError> {
-    usize::try_from(i)
-        .ok()
-        .and_then(|u| values.get(u).copied())
-        .ok_or(IndexError {
-            what,
-            index: i,
-            len: values.len(),
-        })
+    usize::try_from(i).ok().and_then(|u| values.get(u).copied()).ok_or(IndexError { what, index: i, len: values.len() })
 }
 
 /// Resolve X3D's colour/normal binding rules into a [`Binding`].
@@ -112,11 +105,7 @@ pub fn bind<T: Copy>(
     } else {
         let per_face = (0..faces.len())
             .map(|f| {
-                let i = if index.is_empty() {
-                    f as i64
-                } else {
-                    i64::from(*index.get(f).unwrap_or(&-1))
-                };
+                let i = if index.is_empty() { f as i64 } else { i64::from(*index.get(f).unwrap_or(&-1)) };
                 get(values, i, what)
             })
             .collect::<Result<_, _>>()?;
@@ -148,11 +137,7 @@ impl Polygons {
         let len = self.points.len();
         for &c in self.faces.iter().flatten() {
             if c as usize >= len {
-                return Err(IndexError {
-                    what: "coordinate",
-                    index: i64::from(c),
-                    len,
-                });
+                return Err(IndexError { what: "coordinate", index: i64::from(c), len });
             }
         }
         Ok(())
@@ -164,11 +149,7 @@ impl Polygons {
         let p = |i: usize| self.points[face[i % face.len()] as usize];
         let n = (0..face.len()).fold(Vec3::ZERO, |acc, i| {
             let (a, b) = (p(i), p(i + 1));
-            acc + Vec3::new(
-                (a.y - b.y) * (a.z + b.z),
-                (a.z - b.z) * (a.x + b.x),
-                (a.x - b.x) * (a.y + b.y),
-            )
+            acc + Vec3::new((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y))
         });
         if self.ccw { n } else { -n }
     }
@@ -302,11 +283,7 @@ pub fn point_set(points: &[Vec3], colors: Option<&[Vec4]>) -> Mesh {
         .map(|(i, p)| Vertex {
             position: (*p).into(),
             normal: [0.0; 3],
-            color: colors
-                .and_then(|c| c.get(i))
-                .copied()
-                .unwrap_or(Vec4::ONE)
-                .into(),
+            color: colors.and_then(|c| c.get(i)).copied().unwrap_or(Vec4::ONE).into(),
             texcoord: [0.0; 3],
         })
         .collect();
@@ -365,14 +342,7 @@ pub fn cuboid(size: Vec3) -> Mesh {
     let h = size * 0.5;
     let mut b = Builder::default();
     // Each face: its normal and two in-plane axes.
-    for n in [
-        Vec3::X,
-        Vec3::NEG_X,
-        Vec3::Y,
-        Vec3::NEG_Y,
-        Vec3::Z,
-        Vec3::NEG_Z,
-    ] {
+    for n in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
         let u = n.any_orthonormal_vector();
         let v = n.cross(u);
         let c = n * h;
@@ -393,11 +363,7 @@ pub fn sphere(radius: f32, segments: u32) -> Mesh {
         let theta = PI * i as f32 / rings as f32; // 0 at the north pole
         for j in 0..=seg {
             let phi = TAU * j as f32 / seg as f32;
-            let n = Vec3::new(
-                theta.sin() * phi.sin(),
-                theta.cos(),
-                theta.sin() * phi.cos(),
-            );
+            let n = Vec3::new(theta.sin() * phi.sin(), theta.cos(), theta.sin() * phi.cos());
             // X3D: s wraps from the back (−Z), t runs 0 (bottom) to 1 (top).
             let uv = Vec2::new(j as f32 / seg as f32 + 0.5, 1.0 - i as f32 / rings as f32);
             grid.push(b.vertex(n * radius, n, uv));
@@ -433,11 +399,7 @@ fn disk(b: &mut Builder, y: f32, radius: f32, normal: Vec3, segments: u32) {
         .map(|j| {
             let phi = TAU * j as f32 / segments as f32;
             let (x, z) = (phi.sin(), phi.cos());
-            b.vertex(
-                Vec3::new(radius * x, y, radius * z),
-                normal,
-                Vec2::new(x * 0.5 + 0.5, 0.5 - z * 0.5),
-            )
+            b.vertex(Vec3::new(radius * x, y, radius * z), normal, Vec2::new(x * 0.5 + 0.5, 0.5 - z * 0.5))
         })
         .collect();
     for w in ring.windows(2) {
@@ -483,25 +445,16 @@ pub fn cone(bottom_radius: f32, height: f32, parts: Parts, segments: u32) -> Mes
     let mut b = Builder::default();
     if parts.side {
         // The side normal tilts up by the cone's slope.
-        let normal_at =
-            |phi: f32| Vec3::new(phi.sin() * height, bottom_radius, phi.cos() * height).normalize();
+        let normal_at = |phi: f32| Vec3::new(phi.sin() * height, bottom_radius, phi.cos() * height).normalize();
         for j in 0..seg {
-            let (p0, p1) = (
-                TAU * j as f32 / seg as f32,
-                TAU * (j + 1) as f32 / seg as f32,
-            );
-            let base =
-                |phi: f32| Vec3::new(bottom_radius * phi.sin(), y0, bottom_radius * phi.cos());
+            let (p0, p1) = (TAU * j as f32 / seg as f32, TAU * (j + 1) as f32 / seg as f32);
+            let base = |phi: f32| Vec3::new(bottom_radius * phi.sin(), y0, bottom_radius * phi.cos());
             let s = |j: u32| j as f32 / seg as f32 + 0.5;
             let a = b.vertex(base(p0), normal_at(p0), Vec2::new(s(j), 0.0));
             let c = b.vertex(base(p1), normal_at(p1), Vec2::new(s(j + 1), 0.0));
             // One apex vertex per segment, with the in-between normal, so
             // the tip shades smoothly instead of pinching.
-            let apex = b.vertex(
-                Vec3::Y * y1,
-                normal_at((p0 + p1) / 2.0),
-                Vec2::new((s(j) + s(j + 1)) / 2.0, 1.0),
-            );
+            let apex = b.vertex(Vec3::Y * y1, normal_at((p0 + p1) / 2.0), Vec2::new((s(j) + s(j + 1)) / 2.0, 1.0));
             b.tri(a, c, apex);
         }
     }
@@ -525,27 +478,14 @@ mod tests {
                 continue;
             }
             let n = Vec3::from(v(t[0]).normal);
-            assert!(
-                geometric.dot(n) > 0.0,
-                "triangle {t:?} faces inward in {}",
-                m.label
-            );
+            assert!(geometric.dot(n) > 0.0, "triangle {t:?} faces inward in {}", m.label);
         }
     }
 
     #[test]
     fn primitives_face_outward() {
-        let all = Parts {
-            side: true,
-            top: true,
-            bottom: true,
-        };
-        for m in [
-            cuboid(Vec3::splat(2.0)),
-            sphere(1.0, 24),
-            cylinder(1.0, 2.0, all, 24),
-            cone(1.0, 2.0, all, 24),
-        ] {
+        let all = Parts { side: true, top: true, bottom: true };
+        for m in [cuboid(Vec3::splat(2.0)), sphere(1.0, 24), cylinder(1.0, 2.0, all, 24), cone(1.0, 2.0, all, 24)] {
             assert!(!m.indices.is_empty());
             assert_outward(&m);
         }
@@ -559,10 +499,7 @@ mod tests {
     #[test]
     fn split_handles_trailing_minus_one() {
         assert_eq!(split_at_minus_one(&[0, 1, 2, -1]), [vec![0, 1, 2]]);
-        assert_eq!(
-            split_at_minus_one(&[0, 1, 2, -1, 3, 4, 5]),
-            [vec![0, 1, 2], vec![3, 4, 5]]
-        );
+        assert_eq!(split_at_minus_one(&[0, 1, 2, -1, 3, 4, 5]), [vec![0, 1, 2], vec![3, 4, 5]]);
         assert_eq!(split_at_minus_one(&[]).len(), 0);
     }
 

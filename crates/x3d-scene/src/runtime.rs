@@ -33,6 +33,7 @@ pub enum Value {
     Time(f64),
     Vec2(Vec2),
     Vec3(Vec3),
+    Vec4(glam::Vec4),
     Rotation(Quat),
 }
 
@@ -151,11 +152,7 @@ pub struct TransformNode {
 
 impl TransformNode {
     pub fn root() -> Self {
-        Self {
-            parent: None,
-            local: Local::Fixed(Mat4::IDENTITY),
-            world: Mat4::IDENTITY,
-        }
+        Self { parent: None, local: Local::Fixed(Mat4::IDENTITY), world: Mat4::IDENTITY }
     }
     pub fn local_matrix(&self) -> Mat4 {
         match self.local {
@@ -211,6 +208,17 @@ pub enum Behaviour {
         stop: f64,
         enabled: bool,
         active: bool,
+        /// The `start` whose one-shot cycle already sent its final fraction
+        /// (so a jump past the end — `--time 6` — still lands on the end state).
+        finished: f64,
+    },
+    /// A Viewpoint as an event *source*: binding it sends `bindTime` and
+    /// `isBound`, which scenes use to start intro animations.
+    Viewpoint {
+        /// Index into `Scene::viewpoints`.
+        index: u32,
+        /// Bound since the last frame: send the events next frame.
+        pending: bool,
     },
     /// Scalar/Position/Position2D/Color/Orientation interpolators, and the
     /// Integer/Boolean sequencers (which step instead of blending).
@@ -237,12 +245,9 @@ pub enum Target {
     /// Indices into [`Scene::switches`].
     Switch(Vec<u32>),
     /// Indices into [`Scene::materials`] whose texture matrix this sets.
-    TextureTransform {
-        materials: Vec<u32>,
-        fields: TextureTransform2D,
-    },
-    /// A ComposedShader field: index into `Scene::shader_fields`.
-    ShaderField(Vec<u32>),
+    TextureTransform { materials: Vec<u32>, fields: TextureTransform2D },
+    /// A ComposedShader: its fields by name, as indices into `Scene::shader_fields`.
+    Shader(Vec<(String, u32)>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -286,20 +291,17 @@ impl Animation {
                     Target::Material(v) => Target::Material(shift(v, offsets.materials)),
                     Target::Light(v) => Target::Light(shift(v, offsets.lights)),
                     Target::Switch(v) => Target::Switch(shift(v, offsets.switches)),
-                    Target::TextureTransform { materials, fields } => Target::TextureTransform {
-                        materials: shift(materials, offsets.materials),
-                        fields: *fields,
-                    },
-                    Target::ShaderField(v) => Target::ShaderField(shift(v, offsets.shader_fields)),
+                    Target::TextureTransform { materials, fields } => {
+                        Target::TextureTransform { materials: shift(materials, offsets.materials), fields: *fields }
+                    }
+                    Target::Shader(v) => {
+                        Target::Shader(v.iter().map(|(n, i)| (n.clone(), i + offsets.shader_fields)).collect())
+                    }
                 }),
             });
         }
         self.names.extend(other.names.iter().cloned());
-        self.routes.extend(other.routes.iter().map(|r| Route {
-            from: r.from + base,
-            to: r.to + base,
-            ..r.clone()
-        }));
+        self.routes.extend(other.routes.iter().map(|r| Route { from: r.from + base, to: r.to + base, ..r.clone() }));
     }
 }
 
@@ -330,15 +332,7 @@ fn bracket(key: &[f32], f: f32) -> (usize, usize, f32) {
     let hi = key.partition_point(|&k| k <= f);
     let lo = hi - 1;
     let span = key[hi] - key[lo];
-    (
-        lo,
-        hi,
-        if span > 0.0 {
-            (f - key[lo]) / span
-        } else {
-            0.0
-        },
-    )
+    (lo, hi, if span > 0.0 { (f - key[lo]) / span } else { 0.0 })
 }
 
 /// The step a sequencer is on: the last key ≤ f.
@@ -442,10 +436,7 @@ impl Scene {
         // Routes by (source node, source field).
         let mut by_source: HashMap<(u32, &str), Vec<usize>> = HashMap::new();
         for (i, r) in anim.routes.iter().enumerate() {
-            by_source
-                .entry((r.from, r.from_field.as_str()))
-                .or_default()
-                .push(i);
+            by_source.entry((r.from, r.from_field.as_str())).or_default().push(i);
         }
         let mut fired = vec![false; anim.routes.len()];
         let mut queue: VecDeque<(u32, &'static str, Value)> = VecDeque::new();
@@ -459,32 +450,40 @@ impl Scene {
                 stop,
                 enabled,
                 active,
+                finished,
             }) = node
             {
                 let i = i as u32;
                 let cycle = cycle.max(1e-6);
                 let begun = start.max(LOAD_TIME - 1e-9);
-                let running = *enabled
-                    && now >= *start
-                    && (*stop <= *start || now < *stop)
-                    && (*looping || now < *start + cycle);
+                let running =
+                    *enabled && now >= *start && (*stop <= *start || now < *stop) && (*looping || now < *start + cycle);
                 if running {
                     let elapsed = now - begun;
-                    let fraction = if *looping {
-                        (elapsed / cycle).fract()
-                    } else {
-                        ((now - *start) / cycle).min(1.0)
-                    };
+                    let fraction = if *looping { (elapsed / cycle).fract() } else { ((now - *start) / cycle).min(1.0) };
                     queue.push_back((i, "fraction", Value::Float(fraction as f32)));
                     queue.push_back((i, "elapsedTime", Value::Time(elapsed)));
                     queue.push_back((i, "time", Value::Time(now)));
-                } else if *active {
-                    // A one-shot cycle just ended: X3D sends fraction 1 last.
+                } else if !*looping && *start >= LOAD_TIME && now >= *start + cycle && *finished != *start {
+                    // A one-shot cycle ended (maybe between two frames far
+                    // apart): X3D sends fraction 1 last.
+                    *finished = *start;
                     queue.push_back((i, "fraction", Value::Float(1.0)));
+                    queue.push_back((i, "elapsedTime", Value::Time(cycle)));
                 }
                 if running != *active {
                     *active = running;
                     queue.push_back((i, "isActive", Value::Bool(running)));
+                }
+            }
+        }
+
+        // Viewpoints bound since the last frame announce it.
+        for (i, node) in anim.nodes.iter_mut().enumerate() {
+            if let AnimNode::Behaviour(Behaviour::Viewpoint { pending, .. }) = node {
+                if std::mem::take(pending) {
+                    queue.push_back((i as u32, "bindTime", Value::Time(now)));
+                    queue.push_back((i as u32, "isBound", Value::Bool(true)));
                 }
             }
         }
@@ -579,13 +578,11 @@ impl Scene {
                         "ambientIntensity" => v.float().map(|x| l.ambient_intensity = x),
                         "on" => v.boolean().map(|b| l.on = b),
                         "location" => v.vec3().map(|p| match &mut l.local {
-                            LightKind::Point { location, .. }
-                            | LightKind::Spot { location, .. } => *location = p,
+                            LightKind::Point { location, .. } | LightKind::Spot { location, .. } => *location = p,
                             LightKind::Directional { .. } => {}
                         }),
                         "direction" => v.vec3().map(|d| match &mut l.local {
-                            LightKind::Directional { direction }
-                            | LightKind::Spot { direction, .. } => *direction = d,
+                            LightKind::Directional { direction } | LightKind::Spot { direction, .. } => *direction = d,
                             LightKind::Point { .. } => {}
                         }),
                         _ => None,
@@ -618,11 +615,21 @@ impl Scene {
                     changes.materials = true;
                 }
             }
-            Target::ShaderField(ids) => {
-                for &id in ids.iter() {
-                    self.shader_fields[id as usize] = v;
+            Target::Shader(fields) => {
+                if let Some((_, id)) = fields.iter().find(|(name, _)| name == field) {
+                    self.shader_fields[*id as usize] = v;
+                    changes.shader_fields = true;
                 }
-                changes.shader_fields = true;
+            }
+        }
+    }
+
+    /// Bind viewpoint `index` (as the user switching to it would): ROUTEs
+    /// from its `bindTime` fire on the next [`Scene::advance`].
+    pub fn bind_viewpoint(&mut self, index: usize) {
+        for node in &mut self.animation.nodes {
+            if let AnimNode::Behaviour(Behaviour::Viewpoint { index: i, pending }) = node {
+                *pending = *i as usize == index;
             }
         }
     }
@@ -641,9 +648,7 @@ impl Scene {
     pub fn update_worlds(&mut self) {
         for i in 0..self.nodes.len() {
             let local = self.nodes[i].local_matrix();
-            let parent = self.nodes[i]
-                .parent
-                .map_or(Mat4::IDENTITY, |p| self.nodes[p as usize].world);
+            let parent = self.nodes[i].parent.map_or(Mat4::IDENTITY, |p| self.nodes[p as usize].world);
             self.nodes[i].world = parent * local;
         }
         for d in &mut self.draws {
@@ -661,9 +666,7 @@ impl Scene {
 
     /// Is this draw on the chosen side of every Switch it sits under?
     pub fn switched_on(&self, guards: &[crate::scene::SwitchGuard]) -> bool {
-        guards
-            .iter()
-            .all(|g| self.switches[g.switch as usize] == g.child as i32)
+        guards.iter().all(|g| self.switches[g.switch as usize] == g.child as i32)
     }
 }
 
@@ -671,20 +674,13 @@ impl Scene {
 fn receive(b: &mut Behaviour, field: &str, v: Value) -> Vec<(&'static str, Value)> {
     match b {
         Behaviour::Interpolator { key, values } => match (field, v.float()) {
-            ("fraction", Some(f)) => interpolate(key, values, f)
-                .map(|v| ("value", v))
-                .into_iter()
-                .collect(),
+            ("fraction", Some(f)) => interpolate(key, values, f).map(|v| ("value", v)).into_iter().collect(),
             _ => Vec::new(),
         },
         Behaviour::BooleanFilter => match (field, v.boolean()) {
             ("boolean", Some(x)) => {
                 let mut out = vec![("inputNegate", Value::Bool(!x))];
-                out.push(if x {
-                    ("inputTrue", Value::Bool(true))
-                } else {
-                    ("inputFalse", Value::Bool(false))
-                });
+                out.push(if x { ("inputTrue", Value::Bool(true)) } else { ("inputFalse", Value::Bool(false)) });
                 out
             }
             _ => Vec::new(),
@@ -696,14 +692,8 @@ fn receive(b: &mut Behaviour, field: &str, v: Value) -> Vec<(&'static str, Value
             }
             _ => Vec::new(),
         },
-        Behaviour::TimeSensor {
-            start,
-            stop,
-            enabled,
-            cycle,
-            looping,
-            ..
-        } => {
+        Behaviour::Viewpoint { .. } => Vec::new(),
+        Behaviour::TimeSensor { start, stop, enabled, cycle, looping, .. } => {
             match field {
                 "startTime" => {
                     if let Some(t) = v.time() {
@@ -766,11 +756,7 @@ mod tests {
 
     #[test]
     fn hsv_round_trip() {
-        for c in [
-            Vec3::new(0.2, 0.5, 0.9),
-            Vec3::new(0.9, 0.1, 0.1),
-            Vec3::splat(0.4),
-        ] {
+        for c in [Vec3::new(0.2, 0.5, 0.9), Vec3::new(0.9, 0.1, 0.1), Vec3::splat(0.4)] {
             assert!((hsv_to_rgb(rgb_to_hsv(c)) - c).length() < 1e-5);
         }
     }

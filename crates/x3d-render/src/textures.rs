@@ -84,12 +84,7 @@ impl TextureCache {
             anisotropy_clamp: 16, // needs all three filters Linear
             ..Default::default()
         });
-        let white = Arc::new(upload(
-            device,
-            queue,
-            image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4])),
-            "white",
-        ));
+        let white = Arc::new(upload(device, queue, image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4])), "white"));
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -142,20 +137,13 @@ impl TextureCache {
                 resource: wgpu::BindingResource::TextureView(&t.view),
             })
             .collect();
-        entries.push(wgpu::BindGroupEntry {
-            binding: 5,
-            resource: wgpu::BindingResource::Sampler(&self.sampler),
-        });
+        entries.push(wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material textures"),
             layout: &self.layout,
             entries: &entries,
         });
-        let set = Arc::new(MaterialTextures {
-            bind_group,
-            bits,
-            has_alpha,
-        });
+        let set = Arc::new(MaterialTextures { bind_group, bits, has_alpha });
         self.sets.insert(textures.clone(), Arc::clone(&set));
         set
     }
@@ -166,16 +154,8 @@ impl TextureCache {
         }
         let loaded = match image::open(path) {
             Ok(img) => {
-                let label = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Some(Arc::new(upload(
-                    &self.device,
-                    &self.queue,
-                    img.to_rgba8(),
-                    &label,
-                )))
+                let label = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Some(Arc::new(upload(&self.device, &self.queue, img.to_rgba8(), &label)))
             }
             Err(e) => {
                 log::warn!("texture {}: {e}", path.display());
@@ -188,23 +168,14 @@ impl TextureCache {
 }
 
 /// Upload an image with a full mip chain.
-fn upload(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    img: image::RgbaImage,
-    label: &str,
-) -> GpuTexture {
+fn upload(device: &wgpu::Device, queue: &wgpu::Queue, img: image::RgbaImage, label: &str) -> GpuTexture {
     let (w, h) = img.dimensions();
     // 🦀 `ilog2` on integers: a 1024-wide texture has 11 levels (1024 … 1).
     let levels = w.max(h).max(1).ilog2() + 1;
     let has_alpha = img.pixels().any(|p| p.0[3] < 250);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -227,27 +198,14 @@ fn upload(
             },
             &level_img,
             // write_texture has no 256-byte row rule (only buffer copies do).
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * lw),
-                rows_per_image: Some(lh),
-            },
-            wgpu::Extent3d {
-                width: lw,
-                height: lh,
-                depth_or_array_layers: 1,
-            },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh) },
+            wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
         );
         bytes += u64::from(4 * lw * lh);
         if level + 1 < levels {
             let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
-            level_img =
-                image::imageops::resize(&level_img, nw, nh, image::imageops::FilterType::Triangle);
+            level_img = image::imageops::resize(&level_img, nw, nh, image::imageops::FilterType::Triangle);
         }
     }
-    GpuTexture {
-        view: texture.create_view(&Default::default()),
-        has_alpha,
-        bytes,
-    }
+    GpuTexture { view: texture.create_view(&Default::default()), has_alpha, bytes }
 }

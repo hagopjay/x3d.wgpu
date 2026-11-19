@@ -32,30 +32,13 @@ const _: () = assert!(size_of::<GpuLight>() == 80);
 impl From<&Light> for GpuLight {
     fn from(l: &Light) -> Self {
         let (kind, position, direction, attenuation, radius, beam, cut) = match l.kind {
-            LightKind::Directional { direction } => {
-                (0.0, Vec3::ZERO, direction, Vec3::X, f32::MAX, 0.0, 0.0)
+            LightKind::Directional { direction } => (0.0, Vec3::ZERO, direction, Vec3::X, f32::MAX, 0.0, 0.0),
+            LightKind::Point { location, attenuation, radius } => {
+                (1.0, location, Vec3::NEG_Z, attenuation, radius, 0.0, 0.0)
             }
-            LightKind::Point {
-                location,
-                attenuation,
-                radius,
-            } => (1.0, location, Vec3::NEG_Z, attenuation, radius, 0.0, 0.0),
-            LightKind::Spot {
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            } => (
-                2.0,
-                location,
-                direction,
-                attenuation,
-                radius,
-                beam_width,
-                cut_off_angle,
-            ),
+            LightKind::Spot { location, direction, attenuation, radius, beam_width, cut_off_angle } => {
+                (2.0, location, direction, attenuation, radius, beam_width, cut_off_angle)
+            }
         };
         Self {
             // A light that is off keeps its slot (draws' light masks index by
@@ -117,24 +100,13 @@ pub mod texture_bits {
 
 impl DrawUniform {
     /// `textures`: bits from [`texture_bits`] for the slots that loaded.
-    pub fn new(
-        model: Mat4,
-        material: &Material,
-        vertex_colors: bool,
-        textures: u32,
-        light_mask: u32,
-    ) -> Self {
+    pub fn new(model: Mat4, material: &Material, vertex_colors: bool, textures: u32, light_mask: u32) -> Self {
         // 🎨 Normals must be transformed by the inverse-transpose of the
         // model matrix, or non-uniform scale bends them the wrong way.
         let normal_matrix = model.inverse().transpose();
-        let pbr = material.pbr.map_or([0.0, 1.0, 1.0, 1.0], |p| {
-            [
-                p.metallic,
-                p.roughness,
-                p.occlusion_strength,
-                p.normal_scale,
-            ]
-        });
+        let pbr = material
+            .pbr
+            .map_or([0.0, 1.0, 1.0, 1.0], |p| [p.metallic, p.roughness, p.occlusion_strength, p.normal_scale]);
         Self {
             model: model.to_cols_array_2d(),
             normal_matrix: normal_matrix.to_cols_array_2d(),
@@ -143,12 +115,7 @@ impl DrawUniform {
             emissive: material.emissive.extend(material.ambient_intensity).into(),
             specular: material.specular.extend(material.shininess).into(),
             pbr,
-            flags: [
-                u32::from(material.unlit),
-                u32::from(vertex_colors),
-                u32::from(material.pbr.is_some()),
-                textures,
-            ],
+            flags: [u32::from(material.unlit), u32::from(vertex_colors), u32::from(material.pbr.is_some()), textures],
             light_mask: [light_mask, 0, 0, 0],
             line: [material.line_width, 0.0, 0.0, 0.0],
         }

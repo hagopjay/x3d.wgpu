@@ -39,28 +39,19 @@ pub enum FieldError {
 pub fn tokens(s: &str) -> impl Iterator<Item = &str> + '_ {
     // 🦀 `split` takes any `Pattern`; a closure works. `filter` drops the
     // empty strings produced by ", " (comma followed by a space).
-    s.split(|c: char| c.is_ascii_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
+    s.split(|c: char| c.is_ascii_whitespace() || c == ',').filter(|t| !t.is_empty())
 }
 
 /// Parse every token as `f32`.
 pub fn floats(s: &str) -> impl Iterator<Item = Result<f32, FieldError>> + '_ {
-    tokens(s).map(|t| {
-        t.parse::<f32>()
-            .map_err(|_| FieldError::BadNumber(t.to_owned()))
-    })
+    tokens(s).map(|t| t.parse::<f32>().map_err(|_| FieldError::BadNumber(t.to_owned())))
 }
 
 /// Parse every token as `i32` (for index lists like `coordIndex`).
 pub fn ints(s: &str) -> Result<Vec<i32>, FieldError> {
     // 🦀 Collecting an iterator of `Result<T, E>` into `Result<Vec<T>, E>`
     // stops at the first error. One of the most useful tricks in Rust.
-    tokens(s)
-        .map(|t| {
-            t.parse::<i32>()
-                .map_err(|_| FieldError::BadNumber(t.to_owned()))
-        })
-        .collect()
+    tokens(s).map(|t| t.parse::<i32>().map_err(|_| FieldError::BadNumber(t.to_owned()))).collect()
 }
 
 /// Exactly `N` floats, e.g. an SFVec3f.
@@ -74,10 +65,7 @@ pub fn fixed<const N: usize>(s: &str) -> Result<[f32; N], FieldError> {
     let v: Vec<f32> = floats(s).collect::<Result<_, _>>()?;
     // 🦀 `TryFrom<Vec<T>> for [T; N]` gives the array back if the length is
     // right, or the Vec back (in `Err`) if it isn't.
-    <[f32; N]>::try_from(v).map_err(|v| FieldError::WrongCount {
-        expected: N,
-        found: v.len(),
-    })
+    <[f32; N]>::try_from(v).map_err(|v| FieldError::WrongCount { expected: N, found: v.len() })
 }
 
 /// Groups of `N` floats, e.g. an MFVec3f. A trailing partial group is an error.
@@ -91,15 +79,10 @@ pub fn grouped<const N: usize>(s: &str) -> Result<Vec<[f32; N]>, FieldError> {
     let v: Vec<f32> = floats(s).collect::<Result<_, _>>()?;
     let chunks = v.chunks_exact(N);
     if !chunks.remainder().is_empty() {
-        return Err(FieldError::NotAMultiple {
-            group: N,
-            found: v.len(),
-        });
+        return Err(FieldError::NotAMultiple { group: N, found: v.len() });
     }
     // `chunk` is `&[f32]` with len N, so `try_into` cannot fail here.
-    Ok(chunks
-        .map(|chunk| chunk.try_into().expect("chunks_exact"))
-        .collect())
+    Ok(chunks.map(|chunk| chunk.try_into().expect("chunks_exact")).collect())
 }
 
 /// A type that can be parsed from an X3D attribute string.
@@ -121,10 +104,7 @@ impl FieldValue for i32 {
         let v = ints(s)?;
         match v.as_slice() {
             [x] => Ok(*x),
-            _ => Err(FieldError::WrongCount {
-                expected: 1,
-                found: v.len(),
-            }),
+            _ => Err(FieldError::WrongCount { expected: 1, found: v.len() }),
         }
     }
 }
@@ -169,8 +149,7 @@ impl FieldValue for Quat {
 /// Axis-angle → quaternion, tolerating a zero axis (common in exported files).
 pub fn rotation(axis: Vec3, angle: f32) -> Quat {
     // 🦀 `try_normalize` returns `Option<Vec3>`: `None` for a zero-length axis.
-    axis.try_normalize()
-        .map_or(Quat::IDENTITY, |a| Quat::from_axis_angle(a, angle))
+    axis.try_normalize().map_or(Quat::IDENTITY, |a| Quat::from_axis_angle(a, angle))
 }
 
 impl FieldValue for Vec<f32> {
@@ -205,19 +184,14 @@ impl FieldValue for Vec<Vec4> {
 
 impl FieldValue for f64 {
     fn parse_field(s: &str) -> Result<Self, FieldError> {
-        s.trim()
-            .parse()
-            .map_err(|_| FieldError::BadNumber(s.trim().to_owned()))
+        s.trim().parse().map_err(|_| FieldError::BadNumber(s.trim().to_owned()))
     }
 }
 
 /// MFRotation: groups of four (axis x y z, angle).
 impl FieldValue for Vec<Quat> {
     fn parse_field(s: &str) -> Result<Self, FieldError> {
-        Ok(grouped::<4>(s)?
-            .into_iter()
-            .map(|[x, y, z, a]| rotation(Vec3::new(x, y, z), a))
-            .collect())
+        Ok(grouped::<4>(s)?.into_iter().map(|[x, y, z, a]| rotation(Vec3::new(x, y, z), a)).collect())
     }
 }
 

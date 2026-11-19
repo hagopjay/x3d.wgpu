@@ -20,10 +20,11 @@ use std::time::Instant;
 
 use glam::Vec3;
 use wgpu::util::DeviceExt;
-use x3d_scene::runtime::Changes;
-use x3d_scene::{Background, Draw, Light, LodTag, Mesh, Scene, SwitchGuard, Topology, Vertex};
+use x3d_scene::runtime::{Changes, Value};
+use x3d_scene::{Background, Draw, Light, LodTag, Mesh, Scene, ShaderSource, SwitchGuard, Topology, Vertex};
 
 use crate::camera::OrbitCamera;
+use crate::custom::{self, Primitive, Program};
 use crate::gpu::Gpu;
 use crate::textures::{MaterialTextures, TextureCache};
 use crate::uniforms::{DrawUniform, FrameUniform, GpuLight, MAX_LIGHTS};
@@ -53,15 +54,8 @@ pub enum DebugView {
 }
 
 impl DebugView {
-    pub const ALL: [Self; 7] = [
-        Self::Lit,
-        Self::Normals,
-        Self::Depth,
-        Self::BaseColor,
-        Self::LightingOnly,
-        Self::Facing,
-        Self::Uv,
-    ];
+    pub const ALL: [Self; 7] =
+        [Self::Lit, Self::Normals, Self::Depth, Self::BaseColor, Self::LightingOnly, Self::Facing, Self::Uv];
 
     /// Cycle to the next view (wraps around).
     pub fn next(self) -> Self {
@@ -146,6 +140,11 @@ enum GpuMesh {
         segments: wgpu::Buffer,
         count: u32,
         topology: Topology,
+        /// The raw vertices and indices, for ComposedShaders (which draw
+        /// points as sprites and lines as plain lines).
+        vertices: wgpu::Buffer,
+        indices: wgpu::Buffer,
+        index_count: u32,
     },
 }
 
@@ -161,10 +160,8 @@ impl GpuMesh {
     }
     fn bytes(&self) -> u64 {
         match self {
-            Self::Triangles {
-                vertices, indices, ..
-            } => vertices.size() + indices.size(),
-            Self::Wide { segments, .. } => segments.size(),
+            Self::Triangles { vertices, indices, .. } => vertices.size() + indices.size(),
+            Self::Wide { segments, vertices, indices, .. } => segments.size() + vertices.size() + indices.size(),
         }
     }
 }
@@ -197,6 +194,10 @@ struct DrawItem {
     light_mask: u32,
     transparent: bool,
     center: Vec3,
+    /// World matrix (ComposedShaders need it every frame).
+    model: glam::Mat4,
+    /// A ComposedShader: (program, slot in its uniform buffer).
+    custom: Option<(usize, u32)>,
 }
 
 /// Every distinct pipeline we might need.
@@ -207,6 +208,9 @@ struct PipelineKey {
     blend: bool,
     cull: bool,
     wireframe: bool,
+    /// A ComposedShader program (index into `Renderer::programs`) instead
+    /// of the built-in shader.
+    program: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -248,6 +252,11 @@ pub struct Renderer {
     guards: Vec<Arc<[SwitchGuard]>>,
     /// Current `whichChoice` of each animated Switch.
     switches: Vec<i32>,
+    /// Compiled ComposedShaders, and which (shader, sprites) each one is.
+    programs: Vec<Program>,
+    program_of: HashMap<(u32, bool), Option<usize>>,
+    shader_sources: Vec<ShaderSource>,
+    shader_fields: Vec<Value>,
     lights: Vec<Light>,
     background: Background,
     scene_headlight: bool,
@@ -288,11 +297,7 @@ impl Renderer {
         let textures = TextureCache::new(&device, &gpu.queue);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pipeline layout"),
-            bind_group_layouts: &[
-                Some(&frame_layout),
-                Some(&draw_layout),
-                Some(textures.layout()),
-            ],
+            bind_group_layouts: &[Some(&frame_layout), Some(&draw_layout), Some(textures.layout())],
             immediate_size: 0,
         });
 
@@ -305,16 +310,12 @@ impl Renderer {
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame bind group"),
             layout: &frame_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame_buffer.as_entire_binding(),
-            }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() }],
         });
 
         let align = device.limits().min_uniform_buffer_offset_alignment;
         let draw_stride = (size_of::<DrawUniform>() as u32).next_multiple_of(align);
-        let (draw_buffer, draw_bind_group) =
-            Self::draw_buffer(&device, &draw_layout, draw_stride, 1);
+        let (draw_buffer, draw_bind_group) = Self::draw_buffer(&device, &draw_layout, draw_stride, 1);
 
         Self {
             queue: gpu.queue.clone(),
@@ -337,6 +338,10 @@ impl Renderer {
             lods: Vec::new(),
             guards: Vec::new(),
             switches: Vec::new(),
+            programs: Vec::new(),
+            program_of: HashMap::new(),
+            shader_sources: Vec::new(),
+            shader_fields: Vec::new(),
             lights: Vec::new(),
             background: Background::default(),
             scene_headlight: true,
@@ -392,6 +397,11 @@ impl Renderer {
         self.materials.clear();
         self.lods = vec![Arc::from([])];
         self.guards = vec![Arc::from([])];
+        self.programs.clear();
+        self.program_of.clear();
+        self.shader_sources.clone_from(&scene.shaders);
+        self.shader_fields.clone_from(&scene.shader_fields);
+        let mut slots: Vec<u32> = Vec::new();
         let mut material_of: HashMap<*const MaterialTextures, usize> = HashMap::new();
 
         // 🦀 `Arc::as_ptr` gives a stable identity for shared meshes, so a
@@ -411,25 +421,39 @@ impl Renderer {
             // decode every image again.
             let textures = self.textures.material(&draw.material.textures);
             let (texture_bits, texture_alpha) = (textures.bits, textures.has_alpha);
-            let material = *material_of
-                .entry(Arc::as_ptr(&textures))
-                .or_insert_with(|| {
-                    self.materials.push(textures);
-                    self.materials.len() - 1
-                });
+            let material = *material_of.entry(Arc::as_ptr(&textures)).or_insert_with(|| {
+                self.materials.push(textures);
+                self.materials.len() - 1
+            });
             // 🦀 `fold` builds the bit mask: bit i = scene light i reaches this draw.
             let light_mask = scene
                 .lights
                 .iter()
                 .take(32)
                 .enumerate()
-                .fold(0u32, |mask, (i, l)| {
-                    if l.reaches(&draw.scopes) {
-                        mask | 1 << i
-                    } else {
-                        mask
+                .fold(0u32, |mask, (i, l)| if l.reaches(&draw.scopes) { mask | 1 << i } else { mask });
+            // A ComposedShader? Compile it once per (shader, sprites).
+            let custom = draw.material.shader.and_then(|id| {
+                let sprites = mesh.topology == Topology::Points;
+                let program = (*self.program_of.entry((id, sprites)).or_insert_with(|| {
+                    let src = &scene.shaders[id as usize];
+                    let built =
+                        custom::compile(src, sprites).and_then(|c| Program::new(&self.device, c, src.label.clone(), 1));
+                    match built {
+                        Ok(p) => {
+                            self.programs.push(p);
+                            slots.push(0);
+                            Some(self.programs.len() - 1)
+                        }
+                        Err(e) => {
+                            log::warn!("{} falls back to the built-in shading:\n{e}", src.label);
+                            None
+                        }
                     }
-                });
+                }))?;
+                slots[program] += 1;
+                Some((program, slots[program] - 1))
+            });
             let lod = intern_lod(&mut self.lods, &draw.lod);
             let guard = intern_guard(&mut self.guards, &draw.switches);
             self.draws.push(DrawItem {
@@ -444,17 +468,18 @@ impl Renderer {
                 light_mask,
                 transparent: false,
                 center: Vec3::ZERO,
+                model: draw.transform,
+                custom,
             });
         }
         if (self.draw_stride as usize * self.draws.len().max(1)) as u64 > self.draw_buffer.size() {
-            (self.draw_buffer, self.draw_bind_group) = Self::draw_buffer(
-                &self.device,
-                &self.draw_layout,
-                self.draw_stride,
-                self.draws.len(),
-            );
+            (self.draw_buffer, self.draw_bind_group) =
+                Self::draw_buffer(&self.device, &self.draw_layout, self.draw_stride, self.draws.len());
         }
         self.write_draw_uniforms(scene);
+        for (program, n) in self.programs.iter_mut().zip(&slots) {
+            program.reserve(&self.device, *n as usize);
+        }
 
         self.lights.clone_from(&scene.lights);
         self.switches.clone_from(&scene.switches);
@@ -482,6 +507,9 @@ impl Renderer {
         if changes.switches {
             self.switches.clone_from(&scene.switches);
         }
+        if changes.shader_fields {
+            self.shader_fields.clone_from(&scene.shader_fields);
+        }
     }
 
     /// (Re)write every draw's matrices and material into the uniform buffer.
@@ -498,8 +526,11 @@ impl Renderer {
                 item.light_mask,
             );
             slot[..size_of::<DrawUniform>()].copy_from_slice(bytemuck::bytes_of(&uniform));
-            item.transparent = draw.material.is_transparent() || item.texture_alpha;
+            // X_ITE's rule: blended if the material is transparent, the base
+            // texture has alpha, or the colours come from a ColorRGBA node.
+            item.transparent = draw.material.is_transparent() || item.texture_alpha || draw.mesh.rgba_colors;
             item.center = draw.world_bounds().center();
+            item.model = draw.transform;
         }
         self.queue.write_buffer(&self.draw_buffer, 0, &bytes);
     }
@@ -510,20 +541,14 @@ impl Renderer {
         // 🎨 Error scopes catch validation errors instead of sending them to
         // the global handler, so we can decide what to do with them.
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("scene.wgsl (reloaded)"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
-            });
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene.wgsl (reloaded)"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
+        });
         // Build one pipeline too: that catches entry points or bindings that
         // no longer match the Rust side.
-        let key = PipelineKey {
-            topology: Topology::Triangles,
-            blend: false,
-            cull: true,
-            wireframe: false,
-        };
+        let key =
+            PipelineKey { topology: Topology::Triangles, blend: false, cull: true, wireframe: false, program: None };
         let probe = self.create_pipeline(&module, key);
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(err.to_string());
@@ -534,11 +559,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_pipeline(
-        &self,
-        shader: &wgpu::ShaderModule,
-        key: PipelineKey,
-    ) -> wgpu::RenderPipeline {
+    fn create_pipeline(&self, shader: &wgpu::ShaderModule, key: PipelineKey) -> wgpu::RenderPipeline {
         // Triangles read one Vertex per vertex; lines and points read one
         // Segment per *instance* and build a quad from it (see `vs_wide`).
         let wide = key.topology != Topology::Triangles;
@@ -561,53 +582,45 @@ impl Renderer {
             }
         };
         let topology = wgpu::PrimitiveTopology::TriangleList;
-        self.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&format!("{key:?}")),
-                layout: Some(&self.pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader,
-                    entry_point: Some(if wide { "vs_wide" } else { "vs_main" }),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(vertex_layout)],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    front_face: wgpu::FrontFace::Ccw, // X3D's ccw='true'
-                    cull_mode: key.cull.then_some(wgpu::Face::Back),
-                    polygon_mode: if key.wireframe {
-                        wgpu::PolygonMode::Line
-                    } else {
-                        wgpu::PolygonMode::Fill
-                    },
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    // Transparent surfaces test depth but don't write it, so
-                    // things behind them still draw.
-                    depth_write_enabled: Some(!key.blend),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: self.sample_count,
-                    ..Default::default()
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.color_format,
-                        blend: key.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
+        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("{key:?}")),
+            layout: Some(&self.pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some(if wide { "vs_wide" } else { "vs_main" }),
+                compilation_options: Default::default(),
+                buffers: &[Some(vertex_layout)],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology,
+                front_face: wgpu::FrontFace::Ccw, // X3D's ccw='true'
+                cull_mode: key.cull.then_some(wgpu::Face::Back),
+                polygon_mode: if key.wireframe { wgpu::PolygonMode::Line } else { wgpu::PolygonMode::Fill },
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                // Transparent surfaces test depth but don't write it, so
+                // things behind them still draw.
+                depth_write_enabled: Some(!key.blend),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: self.sample_count, ..Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.color_format,
+                    blend: key.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     fn ensure_targets(&mut self, size: (u32, u32)) {
@@ -618,11 +631,7 @@ impl Renderer {
             self.device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
+                    size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
@@ -633,8 +642,7 @@ impl Renderer {
                 .create_view(&Default::default())
         };
         let depth = texture("depth", DEPTH_FORMAT, self.sample_count);
-        let msaa = (self.sample_count > 1)
-            .then(|| texture("msaa colour", self.color_format, self.sample_count));
+        let msaa = (self.sample_count > 1).then(|| texture("msaa colour", self.color_format, self.sample_count));
         self.targets = Some(Targets { size, depth, msaa });
     }
 
@@ -663,10 +671,7 @@ impl Renderer {
             .map(GpuLight::from)
             .collect();
         if lights.len() > MAX_LIGHTS && !std::mem::replace(&mut self.warned_lights, true) {
-            log::warn!(
-                "{} lights; the shader takes {MAX_LIGHTS}, the rest are ignored",
-                lights.len()
-            );
+            log::warn!("{} lights; the shader takes {MAX_LIGHTS}, the rest are ignored", lights.len());
         }
         let mut frame = FrameUniform {
             view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
@@ -691,8 +696,7 @@ impl Renderer {
             *slot = *light;
         }
         stats.lights = frame.params[0];
-        self.queue
-            .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+        self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
 
         // --- 2. order the draws --------------------------------------------
         let wireframe = settings.wireframe && self.supports_wireframe;
@@ -703,7 +707,8 @@ impl Renderer {
                 topology: m.topology(),
                 blend: d.transparent,
                 cull: settings.cull_back_faces && m.solid(),
-                wireframe: wireframe && m.topology() == Topology::Triangles,
+                wireframe: wireframe && m.topology() == Topology::Triangles && d.custom.is_none(),
+                program: d.custom.map(|(p, _)| p),
             }
         };
         let visible = |d: &&DrawItem| {
@@ -714,45 +719,64 @@ impl Renderer {
             };
             // X3D LOD: draw only the level the camera's distance picks.
             // …and only the chosen child of each animated Switch.
-            let switched_on = self.guards[d.guard]
-                .iter()
-                .all(|g| self.switches[g.switch as usize] == g.child as i32);
+            let switched_on = self.guards[d.guard].iter().all(|g| self.switches[g.switch as usize] == g.child as i32);
             shown && switched_on && self.lods[d.lod].iter().all(|t| t.active(eye))
         };
-        let (mut transparent, opaque): (Vec<DrawItem>, Vec<DrawItem>) = self
-            .draws
-            .iter()
-            .filter(visible)
-            .partition(|d| d.transparent);
+        let (mut transparent, opaque): (Vec<DrawItem>, Vec<DrawItem>) =
+            self.draws.iter().filter(visible).partition(|d| d.transparent);
         // Back to front: farthest first. `total_cmp` sorts floats without
         // panicking on NaN (f32 is only `PartialOrd`).
-        transparent.sort_by(|a, b| {
-            b.center
-                .distance_squared(eye)
-                .total_cmp(&a.center.distance_squared(eye))
-        });
-        let ordered: Vec<(DrawItem, PipelineKey)> = opaque
-            .into_iter()
-            .chain(transparent)
-            .map(|d| (d, key_for(&d, &self.meshes)))
-            .collect();
+        transparent.sort_by(|a, b| b.center.distance_squared(eye).total_cmp(&a.center.distance_squared(eye)));
+        let ordered: Vec<(DrawItem, PipelineKey)> =
+            opaque.into_iter().chain(transparent).map(|d| (d, key_for(&d, &self.meshes))).collect();
 
         // Build any pipelines this frame needs (before the pass borrows them).
+        let mut broken: Vec<PipelineKey> = Vec::new();
         for (_, key) in &ordered {
-            if !self.pipelines.contains_key(key) {
-                let p = self.create_pipeline(&self.shader, *key);
-                self.pipelines.insert(*key, p);
+            match key.program {
+                Some(p) => {
+                    let (format, samples) = (self.color_format, self.sample_count);
+                    let device = &self.device;
+                    if self.programs[p]
+                        .pipeline(device, primitive(key), key.blend, format, DEPTH_FORMAT, samples)
+                        .is_none()
+                    {
+                        broken.push(*key);
+                    }
+                }
+                None if !self.pipelines.contains_key(key) => {
+                    let p = self.create_pipeline(&self.shader, *key);
+                    self.pipelines.insert(*key, p);
+                }
+                None => {}
             }
+        }
+        let ordered: Vec<(DrawItem, PipelineKey)> = ordered.into_iter().filter(|(_, k)| !broken.contains(k)).collect();
+
+        // ComposedShader uniforms: X_ITE's built-ins and the fields, per draw.
+        let projection = camera.projection(aspect);
+        let mut field_cache: HashMap<usize, Vec<(String, Value)>> = HashMap::new();
+        for (item, _) in &ordered {
+            let Some((p, slot)) = item.custom else { continue };
+            let fields = field_cache.entry(p).or_insert_with(|| {
+                let id = self.program_of.iter().find(|(_, v)| **v == Some(p)).map_or(0, |((id, _), _)| *id);
+                custom::field_values(&self.shader_sources[id as usize], &self.shader_fields)
+            });
+            let inputs = custom::Inputs { projection, view, model: item.model, viewport: size, fields };
+            let program = &mut self.programs[p];
+            let (stride, len) = (program.stride as usize, program.block.size as usize);
+            let at = slot as usize * stride;
+            let block = program.block.clone();
+            block.fill(&mut program.staging[at..at + len], &inputs);
+        }
+        for program in &self.programs {
+            self.queue.write_buffer(&program.buffer, 0, &program.staging);
         }
 
         // --- 3. record the render pass -------------------------------------
         let targets = self.targets.as_ref().expect("ensure_targets ran");
         let clear = clear_color(&self.background, self.color_format.is_srgb());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
             // With MSAA we draw into the multisampled texture and *resolve*
             // (average) it into the real target at the end of the pass.
@@ -766,17 +790,11 @@ impl Renderer {
                     view,
                     depth_slice: None,
                     resolve_target,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store,
-                    },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &targets.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -786,28 +804,49 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             let mut current: Option<PipelineKey> = None;
             for (item, key) in &ordered {
+                if let Some((p, slot)) = item.custom {
+                    // A ComposedShader: its own pipeline layout and uniform block.
+                    let program = &self.programs[p];
+                    if current != Some(*key) {
+                        let Some(pipeline) = program.get(primitive(key), key.blend) else { continue };
+                        pass.set_pipeline(pipeline);
+                        current = Some(*key);
+                        stats.pipeline_switches += 1;
+                    }
+                    pass.set_bind_group(0, &program.bind_group, &[slot * program.stride]);
+                    match &self.meshes[item.mesh] {
+                        GpuMesh::Triangles { vertices, indices, index_count, .. }
+                        | GpuMesh::Wide { vertices, indices, index_count, topology: Topology::Lines, .. } => {
+                            pass.set_vertex_buffer(0, vertices.slice(..));
+                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..*index_count, 0, 0..1);
+                        }
+                        // Sprites: 6 vertices per point, the point as the instance.
+                        GpuMesh::Wide { vertices, index_count, .. } => {
+                            pass.set_vertex_buffer(0, vertices.slice(..));
+                            pass.draw(0..6, 0..*index_count);
+                        }
+                    }
+                    stats.draw_calls += 1;
+                    continue;
+                }
                 if current != Some(*key) {
                     pass.set_pipeline(&self.pipelines[key]);
+                    // A ComposedShader may have used group 0: rebind the frame.
+                    pass.set_bind_group(0, &self.frame_bind_group, &[]);
                     current = Some(*key);
                     stats.pipeline_switches += 1;
                 }
                 pass.set_bind_group(1, &self.draw_bind_group, &[item.offset]);
                 pass.set_bind_group(2, &self.materials[item.material].bind_group, &[]);
                 match &self.meshes[item.mesh] {
-                    GpuMesh::Triangles {
-                        vertices,
-                        indices,
-                        index_count,
-                        ..
-                    } => {
+                    GpuMesh::Triangles { vertices, indices, index_count, .. } => {
                         pass.set_vertex_buffer(0, vertices.slice(..));
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..*index_count, 0, 0..1);
                     }
                     // 6 vertices (one quad) × one instance per segment.
-                    GpuMesh::Wide {
-                        segments, count, ..
-                    } => {
+                    GpuMesh::Wide { segments, count, .. } => {
                         pass.set_vertex_buffer(0, segments.slice(..));
                         pass.draw(0..6, 0..*count);
                     }
@@ -820,6 +859,15 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         stats.cpu_ms = started.elapsed().as_secs_f32() * 1000.0;
         stats
+    }
+}
+
+/// How a ComposedShader draws this key's geometry.
+fn primitive(key: &PipelineKey) -> Primitive {
+    match key.topology {
+        Topology::Triangles => Primitive::Triangles { cull: key.cull },
+        Topology::Lines => Primitive::Lines,
+        Topology::Points => Primitive::Sprites,
     }
 }
 
@@ -844,45 +892,30 @@ fn intern_guard(guards: &mut Vec<Arc<[SwitchGuard]>>, list: &Arc<[SwitchGuard]>)
 fn upload(device: &wgpu::Device, mesh: &Mesh) -> GpuMesh {
     let label = mesh.label.as_str();
     let buffer = |contents: &[u8], usage| {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents,
-            usage,
-        })
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
     };
     let v = |i: u32| mesh.vertices[i as usize];
-    let segment = |a: u32, b: u32| Segment {
-        a: v(a).position,
-        b: v(b).position,
-        color_a: v(a).color,
-        color_b: v(b).color,
-    };
+    let segment =
+        |a: u32, b: u32| Segment { a: v(a).position, b: v(b).position, color_a: v(a).color, color_b: v(b).color };
     match mesh.topology {
         Topology::Triangles => GpuMesh::Triangles {
-            vertices: buffer(
-                bytemuck::cast_slice(&mesh.vertices),
-                wgpu::BufferUsages::VERTEX,
-            ),
-            indices: buffer(
-                bytemuck::cast_slice(&mesh.indices),
-                wgpu::BufferUsages::INDEX,
-            ),
+            vertices: buffer(bytemuck::cast_slice(&mesh.vertices), wgpu::BufferUsages::VERTEX),
+            indices: buffer(bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
             index_count: mesh.indices.len() as u32,
             solid: mesh.solid,
         },
         topology => {
             let segments: Vec<Segment> = match topology {
-                Topology::Lines => mesh
-                    .indices
-                    .chunks_exact(2)
-                    .map(|p| segment(p[0], p[1]))
-                    .collect(),
+                Topology::Lines => mesh.indices.chunks_exact(2).map(|p| segment(p[0], p[1])).collect(),
                 _ => mesh.indices.iter().map(|&i| segment(i, i)).collect(),
             };
             GpuMesh::Wide {
                 segments: buffer(bytemuck::cast_slice(&segments), wgpu::BufferUsages::VERTEX),
                 count: segments.len() as u32,
                 topology,
+                vertices: buffer(bytemuck::cast_slice(&mesh.vertices), wgpu::BufferUsages::VERTEX),
+                indices: buffer(bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
+                index_count: mesh.indices.len() as u32,
             }
         }
     }
@@ -893,29 +926,16 @@ fn upload(device: &wgpu::Device, mesh: &Mesh) -> GpuMesh {
 fn clear_color(bg: &Background, target_is_srgb: bool) -> wgpu::Color {
     let c = bg.clear_color();
     let decode = |x: f32| {
-        if x <= 0.04045 {
-            x / 12.92
-        } else {
-            ((x + 0.055) / 1.055).powf(2.4)
-        }
+        if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
     };
     let ch = |x: f32| f64::from(if target_is_srgb { decode(x) } else { x });
-    wgpu::Color {
-        r: ch(c.x),
-        g: ch(c.y),
-        b: ch(c.z),
-        a: f64::from(c.w),
-    }
+    wgpu::Color { r: ch(c.x), g: ch(c.y), b: ch(c.z), a: f64::from(c.w) }
 }
 
 /// Fall back to fewer MSAA samples if the GPU can't do what was asked.
 fn supported_samples(gpu: &Gpu, format: wgpu::TextureFormat, wanted: u32) -> u32 {
-    let ok = |f: wgpu::TextureFormat, n: u32| {
-        gpu.adapter
-            .get_texture_format_features(f)
-            .flags
-            .sample_count_supported(n)
-    };
+    let ok =
+        |f: wgpu::TextureFormat, n: u32| gpu.adapter.get_texture_format_features(f).flags.sample_count_supported(n);
     match wanted {
         0 | 1 => 1,
         n if ok(format, n) && ok(DEPTH_FORMAT, n) => n,

@@ -17,6 +17,8 @@
 //! [`camera`] → [`headless`] → `viewer`.
 
 pub mod camera;
+pub mod custom;
+pub mod glsl;
 pub mod gpu;
 pub mod headless;
 pub mod renderer;

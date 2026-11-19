@@ -61,8 +61,8 @@ enum UserEvent {
 
 /// Open the window and run until it closes.
 pub fn run(opts: ViewerOptions) -> Result<()> {
-    let scene = x3d_scene::load_with(&opts.scene, &opts.load)
-        .with_context(|| format!("loading {}", opts.scene.display()))?;
+    let scene =
+        x3d_scene::load_with(&opts.scene, &opts.load).with_context(|| format!("loading {}", opts.scene.display()))?;
     print_report(&opts.scene, &scene);
     println!("{HELP}");
 
@@ -70,20 +70,11 @@ pub fn run(opts: ViewerOptions) -> Result<()> {
     // Wait for events instead of spinning: the GPU only works when something changes.
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let watched = Arc::new(Mutex::new(
-        std::iter::once(opts.scene.clone())
-            .chain(opts.shader.clone())
-            .collect::<Vec<_>>(),
-    ));
+    let watched =
+        Arc::new(Mutex::new(std::iter::once(opts.scene.clone()).chain(opts.shader.clone()).collect::<Vec<_>>()));
     spawn_watcher(Arc::clone(&watched), event_loop.create_proxy());
 
-    let mut app = App {
-        opts,
-        scene,
-        watched,
-        state: None,
-        failure: None,
-    };
+    let mut app = App { opts, scene, watched, state: None, failure: None };
     event_loop.run_app(&mut app)?;
     // 🦀 Errors inside callbacks can't be returned through winit, so we
     // park the first one and return it here.
@@ -168,10 +159,7 @@ impl Clock {
     fn toggle(self) -> Self {
         match self {
             Self::Running { .. } => Self::Paused { at: self.now() },
-            Self::Paused { at } => Self::Running {
-                since: Instant::now(),
-                offset: at,
-            },
+            Self::Paused { at } => Self::Running { since: Instant::now(), offset: at },
         }
     }
 }
@@ -201,12 +189,7 @@ impl App {
         let caps = surface.get_capabilities(&gpu.adapter);
         // Prefer a non-sRGB format: our shader writes display-ready values.
         // (Renderer handles sRGB formats too, by decoding before the write.)
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -243,10 +226,7 @@ impl App {
             title_updated: Instant::now() - Duration::from_secs(1),
             last_cpu_ms: 0.0,
             shader_error,
-            clock: Clock::Running {
-                since: Instant::now(),
-                offset: 0.0,
-            },
+            clock: Clock::Running { since: Instant::now(), offset: 0.0 },
         })
     }
 
@@ -286,20 +266,15 @@ impl App {
                 if !self.scene.viewpoints.is_empty() {
                     s.viewpoint = (s.viewpoint + 1) % self.scene.viewpoints.len();
                     s.camera = camera_for(&self.scene, Some(s.viewpoint));
+                    // Like a browser: binding a viewpoint fires its bindTime events.
+                    self.scene.bind_viewpoint(s.viewpoint);
                     let vp = &self.scene.viewpoints[s.viewpoint];
                     println!("viewpoint {}: {}", s.viewpoint, vp.description);
                 }
             }
             Key::Named(NamedKey::Space) => {
                 s.clock = s.clock.toggle();
-                println!(
-                    "animation {}",
-                    if matches!(s.clock, Clock::Paused { .. }) {
-                        "paused"
-                    } else {
-                        "running"
-                    }
-                );
+                println!("animation {}", if matches!(s.clock, Clock::Paused { .. }) { "paused" } else { "running" });
             }
             Key::Named(NamedKey::F5) => {
                 let path = self.opts.scene.clone();
@@ -359,9 +334,7 @@ impl App {
 
 /// Seconds since 1970: unique enough for screenshot names, no extra crate.
 fn chrono_free_stamp() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn load_shader(renderer: &mut Renderer, path: &Path) -> Result<(), ()> {
@@ -378,10 +351,7 @@ fn load_shader(renderer: &mut Renderer, path: &Path) -> Result<(), ()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!(
-                "⚠ shader {} rejected; keeping the previous one.\n{e}",
-                path.display()
-            );
+            eprintln!("⚠ shader {} rejected; keeping the previous one.\n{e}", path.display());
             Err(())
         }
     }
@@ -391,8 +361,7 @@ fn load_shader(renderer: &mut Renderer, path: &Path) -> Result<(), ()> {
 fn screenshot(s: &mut State, path: &Path) -> Result<()> {
     let size = (s.config.width, s.config.height);
     let target = Offscreen::new(&s.gpu.device, size, s.config.format);
-    s.renderer
-        .render(&target.view, size, &s.camera, &s.settings);
+    s.renderer.render(&target.view, size, &s.camera, &s.settings);
     target.read(&s.gpu)?.save(path)?;
     Ok(())
 }
@@ -410,8 +379,7 @@ impl State {
 
     fn draw(&mut self, scene_name: &str, stats_line: &str) {
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 // The window changed under us: reconfigure and try next frame.
                 self.surface.configure(&self.gpu.device, &self.config);
@@ -425,9 +393,7 @@ impl State {
         };
         let view = frame.texture.create_view(&Default::default());
         let size = (self.config.width, self.config.height);
-        let stats = self
-            .renderer
-            .render(&view, size, &self.camera, &self.settings);
+        let stats = self.renderer.render(&view, size, &self.camera, &self.settings);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
         self.frames += 1;
@@ -442,11 +408,7 @@ impl State {
                 (!s.cull_back_faces, "no-cull"),
                 (self.shader_error, "⚠shader"),
             ];
-            let flags: Vec<&str> = flags
-                .iter()
-                .filter(|(on, _)| *on)
-                .map(|(_, n)| *n)
-                .collect();
+            let flags: Vec<&str> = flags.iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
             self.window.set_title(&format!(
                 "x3d-view — {scene_name} — {} — {stats_line} — {} draws, {} lights, {:.2} ms CPU {}",
                 s.view,
@@ -498,9 +460,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::DroppedFile(path) => self.reload_scene(&path),
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
-            {
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
                 self.key(&event.logical_key, event_loop);
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -540,12 +500,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let name = self
-                    .opts
-                    .scene
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name = self.opts.scene.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let Some(s) = &mut self.state else { return };
                 // Animation: run the event graph to "now", push what changed.
                 let animated = !self.scene.animation.is_empty();
@@ -557,14 +512,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let st = self.scene.report.stats;
                 let mut stats_line = format!("{} tris, {} lines", st.triangles, st.line_segments);
                 if animated {
-                    stats_line += &format!(
-                        ", t {t:.1} s{}",
-                        if matches!(s.clock, Clock::Paused { .. }) {
-                            " ⏸"
-                        } else {
-                            ""
-                        }
-                    );
+                    stats_line +=
+                        &format!(", t {t:.1} s{}", if matches!(s.clock, Clock::Paused { .. }) { " ⏸" } else { "" });
                 }
                 s.draw(&name, &stats_line);
                 // Keep frames coming while something moves (Wait would stall otherwise).

@@ -1,0 +1,3 @@
+# Wider lines read better in a learning project full of comments.
+max_width = 120
+use_small_heuristics = "Max"
