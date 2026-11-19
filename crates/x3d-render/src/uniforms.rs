@@ -81,9 +81,21 @@ pub struct FrameUniform {
     pub shadow_maps: [f32; 4],
     /// 0–3: sun cascades; 4–19: spot (1 each) and point (6 each) layers.
     pub shadow_mats: [[[f32; 4]; 4]; MAX_SHADOW_MATS],
+    /// EnvironmentLight: x = on (1/0), y = specular mip levels,
+    /// z = 1 if diffuse is scaled by (1 − specular) (energy split), w unused.
+    pub env: [f32; 4],
+    /// EnvironmentLight color × intensity.
+    pub env_color: [f32; 4],
+    /// World → environment rotation (inverse of the node's `rotation`).
+    pub env_rotation: [[f32; 4]; 4],
+    /// Irradiance as 9 SH coefficients (rgb), cosine-convolved: E(n) = Σ cᵢ Yᵢ(n).
+    pub env_sh: [[f32; 4]; 9],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
-const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 16 * 4 + 64 * MAX_SHADOW_MATS + 80 * MAX_LIGHTS);
+const _: () = assert!(
+    size_of::<FrameUniform>()
+        == 64 + 64 + 16 * 4 + 16 * 4 + 64 * MAX_SHADOW_MATS + 16 * 2 + 64 + 16 * 9 + 80 * MAX_LIGHTS
+);
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.
 #[repr(C)]

@@ -28,7 +28,8 @@ fn every_measured_row_passes_and_names_its_source() {
     let r = conform::run(&gpu, &root(), &root().join("conformance")).unwrap();
     eprintln!("{}", r.table());
     assert!(r.passed(), "{}", r.table());
-    assert!(r.rows.iter().filter(|r| r.verdict == "pass").count() >= 6);
+    assert!(r.rows.iter().filter(|r| r.verdict == "pass").count() >= 30, "{}", r.table());
+    assert_eq!(r.json["summary"]["not_run"], 0, "every X_ITE row is measured now (EnvironmentLight landed in 0.5)");
     for row in r.json["rows"].as_array().unwrap() {
         assert!(row["expected_from"]["source"]["record"].is_string(), "row without a record: {row}");
     }
@@ -58,4 +59,17 @@ fn a_scene_edited_after_validation_is_refused() {
     assert_eq!(row.verdict, "stale validation", "{}", r.table());
     assert!(!r.passed());
     std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn the_residual_against_x_ite_is_the_encode_curve() {
+    // RESEARCH-ibl.md: with X_ITE's own 2.2 encode, our shading lands within
+    // one byte of every X_ITE row; the sRGB default sits up to 2 above.
+    let Some(gpu) = gpu() else { return };
+    let r = conform::run(&gpu, &root(), &root().join("conformance")).unwrap();
+    for row in &r.rows {
+        let (Some(g), e) = (row.got_gamma22, row.expected) else { continue };
+        let d = (0..3).map(|c| g[c].abs_diff(e[c])).max().unwrap();
+        assert!(d <= 1, "{}: γ2.2 {:?} vs X_ITE {:?}", row.id, g, e);
+    }
 }

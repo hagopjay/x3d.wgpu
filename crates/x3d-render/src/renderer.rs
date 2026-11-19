@@ -136,6 +136,32 @@ pub struct RenderSettings {
     pub shadows: bool,
     /// Frustum culling on the CPU, on the GPU (compute + indirect draws), or off.
     pub cull: Cull,
+    /// How EnvironmentLight splits energy between diffuse and specular.
+    pub ibl: IblModel,
+    /// How linear light becomes display values (PhysicalMaterial and `linear` mode).
+    pub encode: Encode,
+}
+
+/// The linear → display curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Encode {
+    /// The sRGB standard: linear toe, then a 2.4 power.
+    #[default]
+    Srgb,
+    /// A plain 1/2.2 power, as X_ITE 16.7.1 writes it.
+    Gamma22,
+}
+
+/// EnvironmentLight shading models, compared against X_ITE in RESEARCH-ibl.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum IblModel {
+    /// Diffuse + single-scattering specular, no energy bookkeeping.
+    Single = 0,
+    /// Diffuse scaled by (1 − specular).
+    Split = 1,
+    /// Fdez-Agüera 2019 multiple-scattering compensation (default: matches X_ITE).
+    #[default]
+    Multi = 2,
 }
 
 impl RenderSettings {
@@ -162,6 +188,8 @@ impl Default for RenderSettings {
             bloom_threshold: 0.8,
             shadows: false,
             cull: Cull::Cpu,
+            ibl: IblModel::Multi,
+            encode: Encode::Srgb,
         }
     }
 }
@@ -299,6 +327,11 @@ pub struct Renderer {
     frame_buffer: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
     shadow: ShadowMaps,
+    frame_layout: wgpu::BindGroupLayout,
+    /// The EnvironmentLight's prefiltered cube (a black 1×1 cube when none).
+    env_view: wgpu::TextureView,
+    env_sampler: wgpu::Sampler,
+    env: Option<crate::environment::Prepared>,
     /// The scene's world bounds: what the sun's shadow map has to cover.
     bounds: Aabb,
     /// What this GPU can afford (from `Gpu::budget`).
@@ -393,6 +426,22 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -413,16 +462,15 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let shadow = ShadowMaps::new(&device, &gpu.queue, &gpu.budget, &frame_buffer, &draw_layout);
-        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame bind group"),
-            layout: &frame_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow.sun_array) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow.sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&shadow.local_array) },
-            ],
+        let env_view = upload_env_cube(&device, &gpu.queue, &[std::array::from_fn(|_| vec![[0u16; 4]])], 1);
+        let env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("environment"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
         });
+        let frame_bind_group = frame_group(&device, &frame_layout, &frame_buffer, &shadow, &env_view, &env_sampler);
 
         let align = device.limits().min_uniform_buffer_offset_alignment;
         let draw_stride = (size_of::<DrawUniform>() as u32).next_multiple_of(align);
@@ -447,6 +495,10 @@ impl Renderer {
             frame_buffer,
             frame_bind_group,
             shadow,
+            frame_layout,
+            env_view,
+            env_sampler,
+            env: None,
             bounds: Aabb::EMPTY,
             budget,
             cache,
@@ -520,6 +572,7 @@ impl Renderer {
     /// Upload a scene: vertex/index buffers for each unique mesh, and one
     /// big uniform buffer holding every draw's matrices and material.
     pub fn set_scene(&mut self, scene: &Scene) {
+        self.set_environment(scene);
         self.meshes.clear();
         self.draws.clear();
         self.materials.clear();
@@ -879,7 +932,10 @@ impl Renderer {
                 lights.len().min(MAX_LIGHTS) as u32,
                 settings.view as u32,
                 settings.color_mode as u32,
-                u32::from(srgb_out) | u32::from(headlight) << 1 | u32::from(hdr) << 2,
+                u32::from(srgb_out)
+                    | u32::from(headlight) << 1
+                    | u32::from(hdr) << 2
+                    | u32::from(settings.encode == Encode::Gamma22) << 3,
             ],
             near_far: [
                 near,
@@ -903,6 +959,15 @@ impl Renderer {
                 0.0,
             ],
             shadow_mats: plan.mats.map(|m| m.to_cols_array_2d()),
+            env: [
+                f32::from(u8::from(self.env.is_some())),
+                crate::environment::mip_levels() as f32,
+                settings.ibl as u32 as f32,
+                0.0,
+            ],
+            env_color: self.env.as_ref().map_or([0.0; 4], |e| e.color_intensity.extend(1.0).to_array()),
+            env_rotation: self.env.as_ref().map_or(glam::Mat4::IDENTITY, |e| e.rotation).to_cols_array_2d(),
+            env_sh: self.env.as_ref().map_or([[0.0; 4]; 9], |e| e.sh.map(|c| c.extend(0.0).to_array())),
             lights: [bytemuck::Zeroable::zeroed(); MAX_LIGHTS],
         };
         for (slot, light) in frame.lights.iter_mut().zip(&lights) {
@@ -1275,5 +1340,100 @@ fn supported_samples(gpu: &Gpu, format: wgpu::TextureFormat, wanted: u32) -> u32
             log::warn!("{n}× MSAA not supported for {format:?}; using 1×");
             1
         }
+    }
+}
+
+fn frame_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    frame_buffer: &wgpu::Buffer,
+    shadow: &ShadowMaps,
+    env_view: &wgpu::TextureView,
+    env_sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frame bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow.sun_array) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow.sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&shadow.local_array) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(env_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(env_sampler) },
+        ],
+    })
+}
+
+/// A cube texture (Rgba16Float) from per-mip, per-face half-float texels.
+fn upload_env_cube(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mips: &[[Vec<[u16; 4]>; 6]],
+    size: u32,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("environment cube"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+        mip_level_count: mips.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (m, faces) in mips.iter().enumerate() {
+        let s = (size >> m).max(1);
+        for (f, texels) in faces.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: m as u32,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: f as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(texels),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8 * s), rows_per_image: Some(s) },
+                wgpu::Extent3d { width: s, height: s, depth_or_array_layers: 1 },
+            );
+        }
+    }
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::Cube),
+        ..Default::default()
+    })
+}
+
+impl Renderer {
+    /// Prefilter and upload the scene's EnvironmentLight (or clear it).
+    fn set_environment(&mut self, scene: &Scene) {
+        let started = Instant::now();
+        self.env = match scene.environment.as_ref().map(crate::environment::prepare) {
+            Some(Ok(p)) => Some(p),
+            Some(Err(e)) => {
+                log::warn!("EnvironmentLight: {e}; drawn without it");
+                None
+            }
+            None => None,
+        };
+        self.env_view = match &self.env {
+            Some(p) => upload_env_cube(&self.device, &self.queue, &p.specular_mips, crate::environment::SIZE),
+            None => upload_env_cube(&self.device, &self.queue, &[std::array::from_fn(|_| vec![[0u16; 4]])], 1),
+        };
+        if self.env.is_some() {
+            log::info!(
+                "EnvironmentLight: SH9 + {} prefiltered mips in {:.1} ms (CPU)",
+                crate::environment::mip_levels(),
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        self.frame_bind_group = frame_group(
+            &self.device,
+            &self.frame_layout,
+            &self.frame_buffer,
+            &self.shadow,
+            &self.env_view,
+            &self.env_sampler,
+        );
     }
 }

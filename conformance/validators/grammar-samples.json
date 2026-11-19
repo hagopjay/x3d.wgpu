@@ -1,6 +1,6 @@
 {
   "coverage": {
-    "files": 8
+    "files": 9
   },
   "development": false,
   "environment": {
@@ -8,7 +8,7 @@
     "python": "3.13.18"
   },
   "evidence": [],
-  "finished_at": "2026-11-19T14:45:28+00:00",
+  "finished_at": "2026-11-19T15:16:27+00:00",
   "grade": "C",
   "instrument": {
     "branch": "main",
@@ -61,12 +61,17 @@
       "xsd_errors": 0,
       "xsd_valid": true,
       "xsd_version": "4.0"
+    },
+    "scenes/09_environment.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
     }
   },
   "origin": "executed",
   "reason": "",
   "schema": "loom.witness/1",
   "status": "pass",
-  "subject_sha256": "a8830b5ad0383214baac314e816e8b430fcd09e8430b29d5210f217aee1aa719",
+  "subject_sha256": "79f13d3463b87ec2d4eaee78d1c2d4aba0d9155853dc2466c6e94a6c699b1b5e",
   "witness": "grammar"
 }

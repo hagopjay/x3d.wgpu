@@ -258,3 +258,40 @@ mod tests {
         assert_eq!(f32::parse_field("1e-3").unwrap(), 0.001);
     }
 }
+
+/// Decode standard base64 (RFC 4648, `=` padding optional, whitespace
+/// ignored), as found in `data:…;base64,` urls. `None` on a bad character.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+        acc = (acc << 6) | u32::from(value(c)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod base64_tests {
+    #[test]
+    fn decodes_rfc4648_vectors() {
+        for (enc, dec) in
+            [("", ""), ("Zg==", "f"), ("Zm8=", "fo"), ("Zm9v", "foo"), ("Zm9vYmFy", "foobar"), ("Zm9v\nYmE", "fooba")]
+        {
+            assert_eq!(super::base64_decode(enc).unwrap(), dec.as_bytes(), "{enc}");
+        }
+        assert!(super::base64_decode("Zm9v!").is_none());
+    }
+}

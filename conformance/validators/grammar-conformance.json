@@ -1,6 +1,6 @@
 {
   "coverage": {
-    "files": 5
+    "files": 29
   },
   "development": false,
   "environment": {
@@ -8,7 +8,7 @@
     "python": "3.13.18"
   },
   "evidence": [],
-  "finished_at": "2026-11-19T14:45:29+00:00",
+  "finished_at": "2026-11-19T15:16:31+00:00",
   "grade": "C",
   "instrument": {
     "branch": "main",
@@ -22,10 +22,45 @@
     "Fork commit 39c6e94 on branch main; not the family pin unless they match."
   ],
   "measurements": {
+    "conformance/scenes/ctrl_intensity05_m0_r1_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/ctrl_intensity05_m1_r0.5_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/ctrl_intensity05_m1_r0_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/ctrl_intensity0_m0_r1_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/ctrl_intensity0_m1_r0.5_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/ctrl_intensity0_m1_r0_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
     "conformance/scenes/ctrl_noenv_m0_r1_c0.5.x3d": {
       "xsd_errors": 0,
       "xsd_valid": true,
       "xsd_version": "4.0"
+    },
+    "conformance/scenes/ctrl_noenv_m1_r0.5_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
     },
     "conformance/scenes/ctrl_noenv_m1_r0_c1.x3d": {
       "xsd_errors": 0,
@@ -46,12 +81,97 @@
       "xsd_errors": 0,
       "xsd_valid": true,
       "xsd_version": "4.0"
+    },
+    "conformance/scenes/furnace_m0_r0.5_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m0_r0_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m0_r1_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m0_r1_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m1_r0.25_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m1_r0.5_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m1_r0.75_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m1_r0_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/furnace_m1_r1_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m0_r0_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m0_r1_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m0_r1_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m1_r0.25_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m1_r0.5_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m1_r0.75_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m1_r0_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
+    },
+    "conformance/scenes/half_m1_r1_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.1"
     }
   },
   "origin": "executed",
   "reason": "",
   "schema": "loom.witness/1",
   "status": "pass",
-  "subject_sha256": "bbf9efd90bb5fb0b9d04ed21341371bddbec4f6513d7944a92b0223ace6b05f3",
+  "subject_sha256": "093c3d2ea9e53a0c4d0407b6ad4690f269a2c1ce43d54cf5b65e613a2dd688b7",
   "witness": "grammar"
 }

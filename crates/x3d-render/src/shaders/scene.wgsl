@@ -36,6 +36,10 @@ struct Frame {
     cascade_texel: vec4f,       // one texel of cascade i, in world units (for the normal offset)
     shadow_maps: vec4f,         // 1 / sun map size, 1 / local map size
     shadow_mats: array<mat4x4f, 20>, // 0–3 sun cascades, 4–19 spot/point layers (world → light clip)
+    env: vec4f,                 // EnvironmentLight: on, specular mips, model (0 single, 1 split, 2 multi-scatter), —
+    env_color: vec4f,           // color × intensity
+    env_rotation: mat4x4f,      // world → environment
+    env_sh: array<vec4f, 9>,    // irradiance SH (cosine-convolved)
     lights: array<Light, 16>,
 }
 
@@ -59,6 +63,9 @@ struct Draw {
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
 // Spot lights take one layer, point lights six (one per cube face).
 @group(0) @binding(3) var local_shadows: texture_depth_2d_array;
+// EnvironmentLight: the GGX-prefiltered cube (mip = roughness) and its sampler.
+@group(0) @binding(4) var env_cube: texture_cube<f32>;
+@group(0) @binding(5) var env_sampler: sampler;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(2) @binding(0) var t_base: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
@@ -173,6 +180,9 @@ fn linear_to_srgb(c: vec3f) -> vec3f {
     // decides what to do with them. Otherwise clip, as an 8-bit screen would.
     let top = select(1.0, 1e4, (frame.params.w & 4u) != 0u);
     let x = clamp(c, vec3f(0.0), vec3f(top));
+    // Bit 3: X_ITE's encode, a plain 2.2 power (x_ite.js 16.7.1 line 67921),
+    // instead of the piecewise sRGB curve.
+    if (frame.params.w & 8u) != 0u { return pow(x, vec3f(1.0 / 2.2)); }
     return select(1.055 * pow(x, vec3f(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3f(0.0031308));
 }
 
@@ -369,7 +379,57 @@ fn shade_pbr(p: vec3f, n: vec3f, base: vec3f, metallic: f32, roughness: f32, ao:
         let f = f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
         sum += ((1.0 - f) * diffuse_color / PI + d * vis * f) * radiance * n_dot_l;
     }
+    if frame.env.x > 0.0 {
+        sum += environment(n, v, n_dot_v, f0, diffuse_color, roughness, ao);
+    }
     return emissive + sum;
+}
+
+// --- EnvironmentLight (image-based lighting, see environment.rs) ------------
+
+fn sh_irradiance(n: vec3f) -> vec3f {
+    let c = frame.env_sh;
+    return c[0].rgb * 0.282095
+        + c[1].rgb * (0.488603 * n.y) + c[2].rgb * (0.488603 * n.z) + c[3].rgb * (0.488603 * n.x)
+        + c[4].rgb * (1.092548 * n.x * n.y) + c[5].rgb * (1.092548 * n.y * n.z)
+        + c[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + c[7].rgb * (1.092548 * n.x * n.z)
+        + c[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+}
+
+// Karis's analytic fit of the split-sum DFG term ("Physically Based Shading
+// on Mobile", 2014): (scale, bias) so that specular = F0 · scale + bias.
+fn env_brdf(roughness: f32, n_dot_v: f32) -> vec2f {
+    let c0 = vec4f(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4f(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    return vec2f(-1.04, 1.04) * a004 + r.zw;
+}
+
+fn environment(n: vec3f, v: vec3f, n_dot_v: f32, f0: vec3f, diffuse_color: vec3f, roughness: f32, ao: f32) -> vec3f {
+    let to_env = mat3x3f(frame.env_rotation[0].xyz, frame.env_rotation[1].xyz, frame.env_rotation[2].xyz);
+    let irradiance = max(sh_irradiance(to_env * n), vec3f(0.0));
+    let r = to_env * reflect(-v, n);
+    let lod = roughness * (frame.env.y - 1.0);
+    let prefiltered = textureSampleLevel(env_cube, env_sampler, r, lod).rgb;
+    let ab = env_brdf(roughness, n_dot_v);
+    let fss_ess = f0 * ab.x + ab.y; // single-scattering specular
+    let e = irradiance / PI;        // cosine-weighted mean radiance
+    let model = u32(frame.env.z);
+    if model == 2u {
+        // 🎨 Multiple scattering (Fdez-Agüera 2019): light a single GGX bounce
+        // loses (1 − Ess) reappears, tinted by the average Fresnel. A white
+        // metal in a white furnace then stays white at every roughness.
+        let ess = ab.x + ab.y;
+        let ems = 1.0 - ess;
+        let f_avg = f0 + (vec3f(1.0) - f0) / 21.0;
+        let fms_ems = fss_ess * f_avg / (vec3f(1.0) - ems * f_avg) * ems;
+        let kd = diffuse_color * (vec3f(1.0) - fss_ess - fms_ems);
+        return frame.env_color.rgb * ao * (fss_ess * prefiltered + (fms_ems + kd) * e);
+    }
+    // 1: energy split (diffuse gets what specular didn't); 0: plain sum.
+    let kd = select(vec3f(1.0), vec3f(1.0) - fss_ess, model == 1u);
+    return frame.env_color.rgb * ao * (diffuse_color * kd * e + prefiltered * fss_ess);
 }
 
 // 🎨 Normal mapping *without* precomputed tangents: rebuild the tangent

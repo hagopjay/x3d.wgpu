@@ -33,6 +33,7 @@ kinds of signposts:
 | 17 | `timing.rs`, `bench.rs` | timestamp queries, async readback, `Arc<Mutex<…>>` state from a callback |
 | 18 | `cull.rs` + `shaders/cull.wgsl` | frustum planes from a matrix, compute shaders, atomics, indirect draws |
 | 19 | `conform.rs`, `tests/golden.rs`, `fuzz/` | receipts, tolerances with reasons, hashing inputs, fuzzing with libFuzzer |
+| 20 | `environment.rs`, `environment()` in the shader | cube-map conventions, solid angles, spherical harmonics, importance sampling, half floats |
 
 ## Habits that make this fun
 
@@ -70,7 +71,7 @@ know you're done. They're independent; pick what looks fun.
 **G7 ★★★ Instancing.** In `03_def_use_switch.x3d` 25 draws share one mesh. Group draws by (mesh, pipeline), put per-draw data in a *storage* buffer, and issue one `draw_indexed(.., 0..n)` per group, reading `@builtin(instance_index)` in the shader. Measure the draw-call count before and after.
 
 **G8 ✅ PBR for PhysicalMaterial** — *done in 0.2.* Read `shade_pbr` in the shader and the `physical_material_matches_x_ite` test (78/255, as X_ITE measured).
-**G8b ★★★ Image-based lighting.** Bare metals are dark because nothing surrounds them to reflect. Pre-filter an environment (start with the Background colours, then an HDR file) into a cube map with roughness mips, and add the split-sum specular term. X3D 4.1's `EnvironmentLight` is the node for it.
+**G8b ✅ Image-based lighting** — *done in 0.5* (`environment.rs`, `environment()` in the shader, [RESEARCH-ibl.md](RESEARCH-ibl.md)). Try `--ibl single` on `09_environment.x3d` and watch rough gold go dark: that is the energy a single GGX bounce loses. **Follow-ups:** ★★ prefilter on the GPU in a compute shader (it's CPU now: fine for 64², slow for real HDRIs); ★★ `ImageCubeMapTexture` (one image, cross layout) and HDR (`.hdr`/`.exr`) cubes; ★★★ compare a *non-uniform* environment with X_ITE (the furnace can't see face orientation).
 
 **G8c ✅ Tone mapping and bloom** — *done.* Read `post.rs`. **Follow-ups ★★:** auto-exposure (average log-luminance from the smallest bloom mip, eased over time); a lens-dirt texture on the bloom; compare Giza's disco under ACES and AgX.
 

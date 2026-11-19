@@ -18,6 +18,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use x3d_render::cull::Cull;
+use x3d_render::renderer::{Encode, IblModel};
 use x3d_render::{Backend, ColorMode, DebugView, Gpu, Profile, RenderSettings, Shot, ToneMap};
 use x3d_scene::LoadOptions;
 
@@ -181,6 +182,12 @@ struct Common {
     /// Frustum culling: off, cpu, or gpu (compute pass + indirect draws).
     #[arg(long, value_enum, default_value_t = Cull::Cpu)]
     cull: Cull,
+    /// EnvironmentLight shading: single, split or multi (multiple scattering).
+    #[arg(long, value_enum, default_value_t = IblModel::Multi)]
+    ibl: IblModel,
+    /// Linear → display: srgb (the standard) or gamma22 (what X_ITE writes).
+    #[arg(long, value_enum, default_value_t = Encode::Srgb)]
+    encode: Encode,
 }
 
 impl Common {
@@ -200,6 +207,8 @@ impl Common {
             bloom_threshold: self.bloom_threshold,
             shadows: self.shadows,
             cull: self.cull,
+            ibl: self.ibl,
+            encode: self.encode,
         }
     }
     fn load_options(&self) -> LoadOptions {

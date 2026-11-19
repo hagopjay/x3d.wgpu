@@ -23,6 +23,7 @@ pub mod conform;
 pub mod cull;
 pub mod custom;
 pub mod diff;
+pub mod environment;
 pub mod glsl;
 pub mod gpu;
 pub mod headless;
