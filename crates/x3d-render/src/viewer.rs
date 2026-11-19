@@ -36,7 +36,8 @@ mouse  left-drag orbit · right/middle-drag pan · wheel zoom · drop a .x3d fil
 Tab    next Viewpoint      F  frame everything    R  reset to the first Viewpoint
 W      wireframe           H  headlight on/off    C  colour mode (display ↔ linear)
 B      back-face culling   L  lines               P  points
-+ / -  exposure (PBR)       S  save screenshot     F5 reload    Esc quit";
++ / -  exposure (PBR)       [ / ]  thinner/thicker lines and points    Space  pause/run animation
+S      save screenshot     F5 reload              Esc quit";
 
 #[derive(Debug, Clone)]
 pub struct ViewerOptions {
@@ -146,6 +147,33 @@ struct State {
     title_updated: Instant,
     last_cpu_ms: f32,
     shader_error: bool,
+    /// Animation clock: seconds of scene time, and whether it's running.
+    clock: Clock,
+}
+
+/// 🦀 A tiny state machine: running from an instant, or paused at a time.
+#[derive(Debug, Clone, Copy)]
+enum Clock {
+    Running { since: Instant, offset: f64 },
+    Paused { at: f64 },
+}
+
+impl Clock {
+    fn now(self) -> f64 {
+        match self {
+            Self::Running { since, offset } => offset + since.elapsed().as_secs_f64(),
+            Self::Paused { at } => at,
+        }
+    }
+    fn toggle(self) -> Self {
+        match self {
+            Self::Running { .. } => Self::Paused { at: self.now() },
+            Self::Paused { at } => Self::Running {
+                since: Instant::now(),
+                offset: at,
+            },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -198,6 +226,7 @@ impl App {
         if let Some(path) = &self.opts.shader {
             shader_error = load_shader(&mut renderer, path).is_err();
         }
+        self.scene.advance(0.0);
         renderer.set_scene(&self.scene);
         let camera = camera_for(&self.scene, None);
         Ok(State {
@@ -214,14 +243,19 @@ impl App {
             title_updated: Instant::now() - Duration::from_secs(1),
             last_cpu_ms: 0.0,
             shader_error,
+            clock: Clock::Running {
+                since: Instant::now(),
+                offset: 0.0,
+            },
         })
     }
 
     fn reload_scene(&mut self, path: &Path) {
         match x3d_scene::load_with(path, &self.opts.load) {
-            Ok(scene) => {
+            Ok(mut scene) => {
                 print_report(path, &scene);
                 if let Some(s) = &mut self.state {
+                    scene.advance(s.clock.now());
                     s.renderer.set_scene(&scene);
                     if path != self.opts.scene {
                         // A different file: start from its own viewpoint.
@@ -256,6 +290,17 @@ impl App {
                     println!("viewpoint {}: {}", s.viewpoint, vp.description);
                 }
             }
+            Key::Named(NamedKey::Space) => {
+                s.clock = s.clock.toggle();
+                println!(
+                    "animation {}",
+                    if matches!(s.clock, Clock::Paused { .. }) {
+                        "paused"
+                    } else {
+                        "running"
+                    }
+                );
+            }
             Key::Named(NamedKey::F5) => {
                 let path = self.opts.scene.clone();
                 self.reload_scene(&path);
@@ -278,6 +323,8 @@ impl App {
                     let on = s.settings.headlight.unwrap_or(self.scene.headlight);
                     s.settings.headlight = Some(!on);
                 }
+                "]" => s.settings.line_scale *= 1.25,
+                "[" => s.settings.line_scale = (s.settings.line_scale / 1.25).max(0.25),
                 "+" | "=" => s.settings.exposure *= 1.25,
                 "-" => s.settings.exposure /= 1.25,
                 "c" => {
@@ -499,10 +546,31 @@ impl ApplicationHandler<UserEvent> for App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let st = self.scene.report.stats;
-                let stats_line = format!("{} tris, {} lines", st.triangles, st.line_segments);
                 let Some(s) = &mut self.state else { return };
+                // Animation: run the event graph to "now", push what changed.
+                let animated = !self.scene.animation.is_empty();
+                let t = s.clock.now();
+                if animated {
+                    let changes = self.scene.advance(t);
+                    s.renderer.update(&self.scene, &changes);
+                }
+                let st = self.scene.report.stats;
+                let mut stats_line = format!("{} tris, {} lines", st.triangles, st.line_segments);
+                if animated {
+                    stats_line += &format!(
+                        ", t {t:.1} s{}",
+                        if matches!(s.clock, Clock::Paused { .. }) {
+                            " ⏸"
+                        } else {
+                            ""
+                        }
+                    );
+                }
                 s.draw(&name, &stats_line);
+                // Keep frames coming while something moves (Wait would stall otherwise).
+                if animated && matches!(s.clock, Clock::Running { .. }) {
+                    s.window.request_redraw();
+                }
 
                 // Scripted runs (CI, Xvfb): screenshot after N frames, then quit.
                 if let Some(n) = self.opts.exit_after {

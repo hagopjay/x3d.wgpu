@@ -29,6 +29,7 @@ struct Frame {
     //     bit 1: lights[0] is the headlight (it reaches every draw)
     params: vec4u,
     near_far: vec4f,            // near, far planes; z..w = depth range shown by the Depth view
+    viewport: vec4f,            // width, height (pixels), line/point size multiplier
     lights: array<Light, 16>,
 }
 
@@ -42,6 +43,7 @@ struct Draw {
     pbr: vec4f,                 // metallic, roughness, occlusionStrength, normalScale
     flags: vec4u,               // x = unlit, y = vertex colours, z = 1 for PhysicalMaterial, w = texture bits
     light_mask: vec4u,          // x: bit i = scene light i reaches this draw (X3D light scoping)
+    line: vec4f,                // x: line width / point size in pixels
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -86,6 +88,65 @@ fn vs_main(in: VsIn) -> VsOut {
     out.color = in.color;
     out.view_depth = -(frame.view * world).z;
     out.uv = (draw.texture_matrix * vec4f(in.texcoord, 1.0)).xy;
+    return out;
+}
+
+// --- lines and points as screen-space quads --------------------------------
+//
+// 🎨 GPUs draw `LineList` and `PointList` exactly 1 pixel wide (WebGPU has
+// no line width), and some drivers clip such lines badly when an end is
+// behind the camera. So each segment becomes an *instance* of a 6-vertex
+// quad: both ends go to clip space, the segment is cut where it crosses the
+// near plane, and the quad is pushed sideways by half the width *in pixels*.
+// A point is a segment whose two ends are the same: it becomes a square.
+
+struct SegmentIn {
+    @location(0) a: vec3f,
+    @location(1) b: vec3f,
+    @location(2) color_a: vec4f,
+    @location(3) color_b: vec4f,
+}
+
+@vertex
+fn vs_wide(@builtin(vertex_index) vi: u32, in: SegmentIn) -> VsOut {
+    // Two triangles: (x = which end, −1 a / +1 b; y = which side).
+    var corners = array(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+                        vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+    let corner = corners[vi];
+    let world_a = draw.model * vec4f(in.a, 1.0);
+    let world_b = draw.model * vec4f(in.b, 1.0);
+    var ca = frame.view_proj * world_a;
+    var cb = frame.view_proj * world_b;
+    var out: VsOut;
+    // wgpu's clip space keeps 0 ≤ z ≤ w: cut what lies in front of z = 0.
+    if ca.z < 0.0 && cb.z < 0.0 {
+        out.clip = vec4f(0.0, 0.0, -1.0, 1.0);  // all behind us: clipped away
+        return out;
+    }
+    if ca.z < 0.0 { ca = mix(ca, cb, ca.z / (ca.z - cb.z)); }
+    if cb.z < 0.0 { cb = mix(cb, ca, cb.z / (cb.z - ca.z)); }
+
+    let half = frame.viewport.xy * 0.5;
+    let pa = ca.xy / ca.w * half;   // ends in pixels from the screen centre
+    let pb = cb.xy / cb.w * half;
+    let width = max(draw.line.x * frame.viewport.z, 1.0);
+    let is_point = all(in.a == in.b);
+    var dir = pb - pa;
+    dir = select(vec2f(1.0, 0.0), normalize(dir), dot(dir, dir) > 1e-8);
+    let side = vec2f(-dir.y, dir.x);
+    // Points: a square. Lines: sideways by half the width, and each end
+    // pushed out by half the width too (square caps, so joints close).
+    var offset = (corner.x * dir + corner.y * side) * width * 0.5;
+    if is_point { offset = corner * width * 0.5; }
+
+    let at_b = corner.x > 0.0;
+    let c = select(ca, cb, at_b);
+    out.clip = c + vec4f(offset / half * c.w, 0.0, 0.0);
+    out.world_pos = select(world_a, world_b, at_b).xyz;
+    out.normal = vec3f(0.0);
+    out.color = select(in.color_a, in.color_b, at_b);
+    out.view_depth = -(frame.view * select(world_a, world_b, at_b)).z;
+    out.uv = vec2f(0.0);
     return out;
 }
 

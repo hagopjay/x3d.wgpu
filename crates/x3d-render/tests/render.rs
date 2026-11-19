@@ -268,3 +268,39 @@ fn textures_are_sampled_with_x3d_orientation() {
         "expected the top-left (red) texel, got {c:?}"
     );
 }
+
+/// Count the pixels in column x that aren't the background.
+fn painted_rows(img: &RgbaImage, x: u32, background: [u8; 4]) -> u32 {
+    (0..img.height())
+        .filter(|&y| !close(img.get_pixel(x, y).0, background, 8))
+        .count() as u32
+}
+
+#[test]
+fn lines_have_their_x3d_width() {
+    // LineProperties linewidthScaleFactor='5': a horizontal line 5 px tall.
+    let Some(gpu) = gpu() else { return };
+    let s = scene(
+        "<Shape><Appearance><UnlitMaterial emissiveColor='1 1 1'/><LineProperties linewidthScaleFactor='5'/></Appearance>
+           <IndexedLineSet coordIndex='0 1'><Coordinate point='-3 0 0  3 0 0'/></IndexedLineSet></Shape>",
+    );
+    let img = render_scene(&gpu, &s, &shot(RenderSettings::default())).unwrap();
+    assert_eq!(painted_rows(&img, 32, [0, 0, 0, 255]), 5);
+}
+
+#[test]
+fn a_line_running_behind_the_camera_is_clipped_not_smeared() {
+    // From in front of the camera (z = 0) to far behind it (z = 50). Before
+    // the near-plane clip in `vs_wide`, some drivers filled whole tiles.
+    let Some(gpu) = gpu() else { return };
+    let s = scene(
+        "<Shape><Appearance><UnlitMaterial emissiveColor='1 1 1'/></Appearance>
+           <IndexedLineSet coordIndex='0 1'><Coordinate point='0.5 -0.5 0  0.5 -0.5 50'/></IndexedLineSet></Shape>",
+    );
+    let img = render_scene(&gpu, &s, &shot(RenderSettings::default())).unwrap();
+    let painted = img.pixels().filter(|p| p.0[0] > 8).count();
+    assert!(
+        painted > 0 && painted < 64 * 3,
+        "a thin line, not a filled block: {painted} px"
+    );
+}

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use glam::{Mat4, Quat, Vec3, Vec4};
 
 use crate::report::Report;
+use crate::runtime::{Animation, Offsets, TransformNode, Value};
 
 /// One vertex as the GPU sees it.
 ///
@@ -265,6 +266,9 @@ pub struct Material {
     pub textures: Textures,
     /// TextureTransform / TextureTransformMatrix3D, applied to `Vertex::texcoord`.
     pub texture_matrix: Mat4,
+    /// Lines and points: width in pixels (LineProperties `linewidthScaleFactor`,
+    /// PointProperties `pointSizeScaleFactor`; X3D's nominal size is 1 px).
+    pub line_width: f32,
 }
 
 impl Default for Material {
@@ -281,6 +285,7 @@ impl Default for Material {
             pbr: None,
             textures: Textures::NONE,
             texture_matrix: Mat4::IDENTITY,
+            line_width: 1.0,
         }
     }
 }
@@ -298,6 +303,7 @@ impl Material {
         pbr: None,
         textures: Textures::NONE,
         texture_matrix: Mat4::IDENTITY,
+        line_width: 1.0,
     };
 
     pub fn is_transparent(&self) -> bool {
@@ -314,10 +320,23 @@ pub struct Draw {
     pub material: Material,
     /// The light scopes (groups holding `global='false'` lights) this draw is inside.
     pub scopes: Arc<[u32]>,
+    /// The transform node this draw hangs from: `transform` is its world matrix.
+    pub node: u32,
+    /// Index into [`Scene::materials`]; `material` mirrors it, kept live by events.
+    pub material_id: u32,
+    /// Animated Switches above this draw, and which child it is in each.
+    pub switches: Arc<[SwitchGuard]>,
     /// The LOD levels this draw belongs to (outermost first). Empty for
     /// most draws. The renderer shows the draw only when, for every tag,
     /// the camera's distance picks that level.
     pub lod: Arc<[LodTag]>,
+}
+
+/// "This draw is under child `child` of Switch number `switch`."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchGuard {
+    pub switch: u32,
+    pub child: u32,
 }
 
 /// "This draw is level `level` of LOD number `group`."
@@ -389,6 +408,12 @@ pub struct Light {
     /// `global='false'` lights only light their own group: draws whose
     /// `scopes` contain this id. `None` lights everything.
     pub scope: Option<u32>,
+    /// `on='false'` (or switched off by an event).
+    pub on: bool,
+    /// The transform node the light sits under ([`Scene::nodes`]).
+    pub node: u32,
+    /// `kind` in the node's own space; `kind` is this placed in the world.
+    pub local: LightKind,
 }
 
 impl Light {
@@ -401,9 +426,24 @@ impl Light {
 impl Light {
     /// The same light seen through a transform (used when an Inline is placed).
     pub fn transformed(&self, m: &Mat4) -> Self {
+        Self {
+            kind: self.kind.transformed(m),
+            ..*self
+        }
+    }
+
+    /// `local` placed by a node's world matrix.
+    pub fn local_in(&self, m: &Mat4) -> LightKind {
+        self.local.transformed(m)
+    }
+}
+
+impl LightKind {
+    /// The same light seen through a transform.
+    pub fn transformed(&self, m: &Mat4) -> Self {
         let dir = |d: Vec3| m.transform_vector3(d).normalize_or(d);
         let radius_scale = m.to_scale_rotation_translation().0.max_element();
-        let kind = match self.kind {
+        match *self {
             LightKind::Directional { direction } => LightKind::Directional {
                 direction: dir(direction),
             },
@@ -431,10 +471,11 @@ impl Light {
                 beam_width,
                 cut_off_angle,
             },
-        };
-        Self { kind, ..*self }
+        }
     }
+}
 
+impl Light {
     /// The NavigationInfo headlight: a white directional light along the
     /// camera's view direction.
     pub fn headlight(view_direction: Vec3) -> Self {
@@ -446,6 +487,11 @@ impl Light {
             intensity: 1.0,
             ambient_intensity: 0.0,
             scope: None,
+            on: true,
+            node: 0,
+            local: LightKind::Directional {
+                direction: view_direction,
+            },
         }
     }
 }
@@ -527,25 +573,65 @@ pub struct Scene {
     pub lod_groups: u32,
     /// How many light scopes the lights and draws refer to.
     pub light_scopes: u32,
+
+    // --- the live part (see `runtime`) ---
+    /// The transform tree; node 0 is the root. Parents come before children.
+    pub nodes: Vec<TransformNode>,
+    /// Every distinct material; draws refer to them by `material_id`.
+    pub materials: Vec<crate::Material>,
+    /// `whichChoice` of each Switch that events can change.
+    pub switches: Vec<i32>,
+    /// Current values of ComposedShader fields that events can change.
+    pub shader_fields: Vec<Value>,
+    /// TimeSensors, interpolators and ROUTEs.
+    pub animation: Animation,
 }
 
 impl Scene {
     /// Add an inlined scene's contents, placed by `m`. Its Background and
     /// NavigationInfo don't bind (X3D: only the main scene's do).
     /// `scopes`: the light scopes the Inline itself sits in.
-    pub fn splice(&mut self, child: &Scene, m: Mat4, scopes: &[u32], from: &str) {
+    pub fn splice(&mut self, child: &Scene, m: Mat4, parent_node: u32, scopes: &[u32], from: &str) {
         let scope_offset = self.light_scopes;
-        // LOD groups are numbered per scene: shift the child's past ours, and
-        // move their centres along with everything else.
-        let offset = self.lod_groups;
+        let lod_offset = self.lod_groups;
+        let o = Offsets {
+            nodes: self.nodes.len() as u32,
+            materials: self.materials.len() as u32,
+            lights: self.lights.len() as u32,
+            switches: self.switches.len() as u32,
+            shader_fields: self.shader_fields.len() as u32,
+        };
+        // The child's root hangs under the Inline's node; its other nodes keep
+        // their parents, renumbered.
+        self.nodes.extend(child.nodes.iter().map(|n| TransformNode {
+            parent: Some(n.parent.map_or(parent_node, |p| p + o.nodes)),
+            world: m * n.world,
+            ..*n
+        }));
+        self.materials.extend(child.materials.iter().cloned());
+        self.switches.extend(child.switches.iter().copied());
+        self.shader_fields
+            .extend(child.shader_fields.iter().copied());
         self.draws.extend(child.draws.iter().map(|d| {
             Draw {
                 transform: m * d.transform,
+                node: d.node + o.nodes,
+                material_id: d.material_id + o.materials,
+                switches: d
+                    .switches
+                    .iter()
+                    .map(|g| SwitchGuard {
+                        switch: g.switch + o.switches,
+                        ..*g
+                    })
+                    .collect(),
+                // LOD groups are numbered per scene: shift the child's past ours, and
+                // move their centres along with everything else.
                 lod: d
                     .lod
                     .iter()
                     .map(|t| LodTag {
-                        group: t.group + offset,
+                        group: t.group + lod_offset,
                         center: m.transform_point3(t.center),
                         ..t.clone()
                     })
@@ -562,8 +648,10 @@ impl Scene {
         self.light_scopes += child.light_scopes;
         self.lights.extend(child.lights.iter().map(|l| Light {
             scope: l.scope.map(|s| s + scope_offset),
+            node: l.node + o.nodes,
             ..l.transformed(&m)
         }));
+        self.animation.absorb(&child.animation, &o);
         let (_, rotation, _) = m.to_scale_rotation_translation();
         self.viewpoints
             .extend(child.viewpoints.iter().map(|v| Viewpoint {

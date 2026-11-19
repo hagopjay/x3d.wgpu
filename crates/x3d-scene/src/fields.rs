@@ -203,6 +203,31 @@ impl FieldValue for Vec<Vec4> {
     }
 }
 
+impl FieldValue for f64 {
+    fn parse_field(s: &str) -> Result<Self, FieldError> {
+        s.trim()
+            .parse()
+            .map_err(|_| FieldError::BadNumber(s.trim().to_owned()))
+    }
+}
+
+/// MFRotation: groups of four (axis x y z, angle).
+impl FieldValue for Vec<Quat> {
+    fn parse_field(s: &str) -> Result<Self, FieldError> {
+        Ok(grouped::<4>(s)?
+            .into_iter()
+            .map(|[x, y, z, a]| rotation(Vec3::new(x, y, z), a))
+            .collect())
+    }
+}
+
+/// MFBool: `true false TRUE …`.
+impl FieldValue for Vec<bool> {
+    fn parse_field(s: &str) -> Result<Self, FieldError> {
+        tokens(s).map(bool::parse_field).collect()
+    }
+}
+
 /// MFString: `'"EXAMINE" "ANY"'` → `["EXAMINE", "ANY"]`.
 /// Good enough for the fields we read; escaped quotes are not handled.
 impl FieldValue for Vec<String> {

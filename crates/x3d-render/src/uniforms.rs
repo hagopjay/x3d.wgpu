@@ -58,11 +58,13 @@ impl From<&Light> for GpuLight {
             ),
         };
         Self {
-            color_intensity: l.color.extend(l.intensity).into(),
+            // A light that is off keeps its slot (draws' light masks index by
+            // position) but contributes nothing.
+            color_intensity: l.color.extend(if l.on { l.intensity } else { 0.0 }).into(),
             position_kind: position.extend(kind).into(),
             direction_ambient: direction
                 .normalize_or(Vec3::NEG_Z)
-                .extend(l.ambient_intensity)
+                .extend(if l.on { l.ambient_intensity } else { 0.0 })
                 .into(),
             attenuation_radius: attenuation.extend(radius).into(),
             spot: [beam, cut, 0.0, 0.0],
@@ -79,9 +81,11 @@ pub struct FrameUniform {
     pub camera_pos: [f32; 4],
     pub params: [u32; 4],
     pub near_far: [f32; 4],
+    /// Target width and height in pixels, then the line/point size multiplier.
+    pub viewport: [f32; 4],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
-const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 3 + 80 * MAX_LIGHTS);
+const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 80 * MAX_LIGHTS);
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.
 #[repr(C)]
@@ -97,8 +101,10 @@ pub struct DrawUniform {
     pub flags: [u32; 4],
     /// x: bit *i* set = scene light *i* reaches this draw (X3D light scoping).
     pub light_mask: [u32; 4],
+    /// x: line width / point size in pixels.
+    pub line: [f32; 4],
 }
-const _: () = assert!(size_of::<DrawUniform>() == 64 * 3 + 16 * 6);
+const _: () = assert!(size_of::<DrawUniform>() == 64 * 3 + 16 * 7);
 
 /// Bits in `flags.w`: which texture slots hold a real texture.
 pub mod texture_bits {
@@ -144,6 +150,7 @@ impl DrawUniform {
                 textures,
             ],
             light_mask: [light_mask, 0, 0, 0],
+            line: [material.line_width, 0.0, 0.0, 0.0],
         }
     }
 }

@@ -20,7 +20,8 @@ use std::time::Instant;
 
 use glam::Vec3;
 use wgpu::util::DeviceExt;
-use x3d_scene::{Background, Light, LodTag, Mesh, Scene, Topology, Vertex};
+use x3d_scene::runtime::Changes;
+use x3d_scene::{Background, Draw, Light, LodTag, Mesh, Scene, SwitchGuard, Topology, Vertex};
 
 use crate::camera::OrbitCamera;
 use crate::gpu::Gpu;
@@ -100,6 +101,8 @@ pub struct RenderSettings {
     pub show_points: bool,
     /// Multiplies PhysicalMaterial's linear light before display (1 = as X_ITE).
     pub exposure: f32,
+    /// Multiplies line widths and point sizes (e.g. 2 on a HiDPI screen).
+    pub line_scale: f32,
 }
 
 impl Default for RenderSettings {
@@ -113,6 +116,7 @@ impl Default for RenderSettings {
             show_lines: true,
             show_points: true,
             exposure: 1.0,
+            line_scale: 1.0,
         }
     }
 }
@@ -128,13 +132,51 @@ pub struct FrameStats {
     pub cpu_ms: f32,
 }
 
+/// Triangle meshes are vertex + index buffers. Lines and points are one
+/// buffer of [`Segment`]s, drawn as instanced quads.
 #[derive(Debug)]
-struct GpuMesh {
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
-    topology: Topology,
-    solid: bool,
+enum GpuMesh {
+    Triangles {
+        vertices: wgpu::Buffer,
+        indices: wgpu::Buffer,
+        index_count: u32,
+        solid: bool,
+    },
+    Wide {
+        segments: wgpu::Buffer,
+        count: u32,
+        topology: Topology,
+    },
+}
+
+impl GpuMesh {
+    fn topology(&self) -> Topology {
+        match self {
+            Self::Triangles { .. } => Topology::Triangles,
+            Self::Wide { topology, .. } => *topology,
+        }
+    }
+    fn solid(&self) -> bool {
+        matches!(self, Self::Triangles { solid: true, .. })
+    }
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::Triangles {
+                vertices, indices, ..
+            } => vertices.size() + indices.size(),
+            Self::Wide { segments, .. } => segments.size(),
+        }
+    }
+}
+
+/// One line segment (or one point: `a == b`), as the `vs_wide` shader reads it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Segment {
+    a: [f32; 3],
+    b: [f32; 3],
+    color_a: [f32; 4],
+    color_b: [f32; 4],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +188,13 @@ struct DrawItem {
     material: usize,
     /// Index into `Renderer::lods`: the LOD levels this draw belongs to.
     lod: usize,
+    /// Index into `Renderer::guards`: the animated Switches it sits under.
+    guard: usize,
+    /// The `Scene::draws` entry this came from (for animation updates).
+    source: usize,
+    texture_bits: u32,
+    texture_alpha: bool,
+    light_mask: u32,
     transparent: bool,
     center: Vec3,
 }
@@ -195,6 +244,10 @@ pub struct Renderer {
     materials: Vec<Arc<MaterialTextures>>,
     /// Distinct LOD tag lists; index 0 is "not inside any LOD".
     lods: Vec<Arc<[LodTag]>>,
+    /// Distinct Switch guard lists; index 0 is "under no animated Switch".
+    guards: Vec<Arc<[SwitchGuard]>>,
+    /// Current `whichChoice` of each animated Switch.
+    switches: Vec<i32>,
     lights: Vec<Light>,
     background: Background,
     scene_headlight: bool,
@@ -282,6 +335,8 @@ impl Renderer {
             textures,
             materials: Vec::new(),
             lods: Vec::new(),
+            guards: Vec::new(),
+            switches: Vec::new(),
             lights: Vec::new(),
             background: Background::default(),
             scene_headlight: true,
@@ -336,14 +391,14 @@ impl Renderer {
         self.draws.clear();
         self.materials.clear();
         self.lods = vec![Arc::from([])];
+        self.guards = vec![Arc::from([])];
         let mut material_of: HashMap<*const MaterialTextures, usize> = HashMap::new();
 
         // 🦀 `Arc::as_ptr` gives a stable identity for shared meshes, so a
         // DEF'd mesh USE'd 100 times is uploaded once.
         let mut index_of: HashMap<*const Mesh, usize> = HashMap::new();
-        let mut uniforms: Vec<DrawUniform> = Vec::with_capacity(scene.draws.len());
 
-        for draw in &scene.draws {
+        for (source, draw) in scene.draws.iter().enumerate() {
             let mesh = &draw.mesh;
             if mesh.indices.is_empty() {
                 continue;
@@ -355,15 +410,13 @@ impl Renderer {
             // Textures are cached across scenes, so a hot reload doesn't
             // decode every image again.
             let textures = self.textures.material(&draw.material.textures);
-            let transparent = draw.material.is_transparent() || textures.has_alpha;
-            let bits = textures.bits;
+            let (texture_bits, texture_alpha) = (textures.bits, textures.has_alpha);
             let material = *material_of
                 .entry(Arc::as_ptr(&textures))
                 .or_insert_with(|| {
                     self.materials.push(textures);
                     self.materials.len() - 1
                 });
-            let offset = self.draw_stride * uniforms.len() as u32;
             // 🦀 `fold` builds the bit mask: bit i = scene light i reaches this draw.
             let light_mask = scene
                 .lights
@@ -377,46 +430,34 @@ impl Renderer {
                         mask
                     }
                 });
-            uniforms.push(DrawUniform::new(
-                draw.transform,
-                &draw.material,
-                mesh.has_colors,
-                bits,
-                light_mask,
-            ));
-            let lod = if draw.lod.is_empty() {
-                0
-            } else {
-                self.lods.push(Arc::clone(&draw.lod));
-                self.lods.len() - 1
-            };
+            let lod = intern_lod(&mut self.lods, &draw.lod);
+            let guard = intern_guard(&mut self.guards, &draw.switches);
             self.draws.push(DrawItem {
                 mesh: mesh_index,
-                offset,
+                offset: self.draw_stride * self.draws.len() as u32,
                 material,
                 lod,
-                transparent,
-                center: draw.world_bounds().center(),
+                guard,
+                source,
+                texture_bits,
+                texture_alpha,
+                light_mask,
+                transparent: false,
+                center: Vec3::ZERO,
             });
         }
-
-        // Lay the uniforms out `draw_stride` bytes apart.
-        let stride = self.draw_stride as usize;
-        let mut bytes = vec![0u8; stride * uniforms.len().max(1)];
-        for (slot, u) in bytes.chunks_exact_mut(stride).zip(&uniforms) {
-            slot[..size_of::<DrawUniform>()].copy_from_slice(bytemuck::bytes_of(u));
-        }
-        if bytes.len() as u64 > self.draw_buffer.size() {
+        if (self.draw_stride as usize * self.draws.len().max(1)) as u64 > self.draw_buffer.size() {
             (self.draw_buffer, self.draw_bind_group) = Self::draw_buffer(
                 &self.device,
                 &self.draw_layout,
                 self.draw_stride,
-                uniforms.len(),
+                self.draws.len(),
             );
         }
-        self.queue.write_buffer(&self.draw_buffer, 0, &bytes);
+        self.write_draw_uniforms(scene);
 
         self.lights.clone_from(&scene.lights);
+        self.switches.clone_from(&scene.switches);
         self.background = scene.background.clone();
         self.scene_headlight = scene.headlight;
         log::info!(
@@ -424,9 +465,43 @@ impl Renderer {
             self.meshes.len(),
             self.draws.len(),
             self.materials.len(),
-            self.meshes.iter().map(|m| m.vertices.size()).sum::<u64>() / 1024,
+            self.meshes.iter().map(GpuMesh::bytes).sum::<u64>() / 1024,
             self.textures.bytes() / 1024
         );
+    }
+
+    /// Follow an animated scene: call after [`Scene::advance`] with what it
+    /// changed. Cheap when nothing did.
+    pub fn update(&mut self, scene: &Scene, changes: &Changes) {
+        if changes.transforms || changes.materials {
+            self.write_draw_uniforms(scene);
+        }
+        if changes.lights {
+            self.lights.clone_from(&scene.lights);
+        }
+        if changes.switches {
+            self.switches.clone_from(&scene.switches);
+        }
+    }
+
+    /// (Re)write every draw's matrices and material into the uniform buffer.
+    fn write_draw_uniforms(&mut self, scene: &Scene) {
+        let stride = self.draw_stride as usize;
+        let mut bytes = vec![0u8; stride * self.draws.len().max(1)];
+        for (item, slot) in self.draws.iter_mut().zip(bytes.chunks_exact_mut(stride)) {
+            let draw: &Draw = &scene.draws[item.source];
+            let uniform = DrawUniform::new(
+                draw.transform,
+                &draw.material,
+                draw.mesh.has_colors,
+                item.texture_bits,
+                item.light_mask,
+            );
+            slot[..size_of::<DrawUniform>()].copy_from_slice(bytemuck::bytes_of(&uniform));
+            item.transparent = draw.material.is_transparent() || item.texture_alpha;
+            item.center = draw.world_bounds().center();
+        }
+        self.queue.write_buffer(&self.draw_buffer, 0, &bytes);
     }
 
     /// Replace the shader. On any compile/validation error the old shader
@@ -464,26 +539,35 @@ impl Renderer {
         shader: &wgpu::ShaderModule,
         key: PipelineKey,
     ) -> wgpu::RenderPipeline {
-        let topology = match key.topology {
-            Topology::Triangles => wgpu::PrimitiveTopology::TriangleList,
-            Topology::Lines => wgpu::PrimitiveTopology::LineList,
-            Topology::Points => wgpu::PrimitiveTopology::PointList,
+        // Triangles read one Vertex per vertex; lines and points read one
+        // Segment per *instance* and build a quad from it (see `vs_wide`).
+        let wide = key.topology != Topology::Triangles;
+        let vertex_layout = if wide {
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<Segment>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4
+                ],
+            }
+        } else {
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                // position, normal, colour, texcoord → @location(0) … (3) in the shader.
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x3
+                ],
+            }
         };
-        let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            // position, normal, colour, texcoord → @location(0) … (3) in the shader.
-            attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x3
-            ],
-        };
+        let topology = wgpu::PrimitiveTopology::TriangleList;
         self.device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(&format!("{key:?}")),
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(if wide { "vs_wide" } else { "vs_main" }),
                     compilation_options: Default::default(),
                     buffers: &[Some(vertex_layout)],
                 },
@@ -600,6 +684,7 @@ impl Renderer {
                 (camera.distance - camera.scene_radius).max(near),
                 camera.distance + camera.scene_radius,
             ],
+            viewport: [size.0 as f32, size.1 as f32, settings.line_scale, 0.0],
             lights: [bytemuck::Zeroable::zeroed(); MAX_LIGHTS],
         };
         for (slot, light) in frame.lights.iter_mut().zip(&lights) {
@@ -615,20 +700,24 @@ impl Renderer {
         let key_for = |d: &DrawItem, meshes: &[GpuMesh]| {
             let m = &meshes[d.mesh];
             PipelineKey {
-                topology: m.topology,
+                topology: m.topology(),
                 blend: d.transparent,
-                cull: settings.cull_back_faces && m.solid && m.topology == Topology::Triangles,
-                wireframe: wireframe && m.topology == Topology::Triangles,
+                cull: settings.cull_back_faces && m.solid(),
+                wireframe: wireframe && m.topology() == Topology::Triangles,
             }
         };
         let visible = |d: &&DrawItem| {
-            let shown = match self.meshes[d.mesh].topology {
+            let shown = match self.meshes[d.mesh].topology() {
                 Topology::Triangles => true,
                 Topology::Lines => settings.show_lines,
                 Topology::Points => settings.show_points,
             };
             // X3D LOD: draw only the level the camera's distance picks.
-            shown && self.lods[d.lod].iter().all(|t| t.active(eye))
+            // …and only the chosen child of each animated Switch.
+            let switched_on = self.guards[d.guard]
+                .iter()
+                .all(|g| self.switches[g.switch as usize] == g.child as i32);
+            shown && switched_on && self.lods[d.lod].iter().all(|t| t.active(eye))
         };
         let (mut transparent, opaque): (Vec<DrawItem>, Vec<DrawItem>) = self
             .draws
@@ -702,12 +791,27 @@ impl Renderer {
                     current = Some(*key);
                     stats.pipeline_switches += 1;
                 }
-                let mesh = &self.meshes[item.mesh];
                 pass.set_bind_group(1, &self.draw_bind_group, &[item.offset]);
                 pass.set_bind_group(2, &self.materials[item.material].bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                match &self.meshes[item.mesh] {
+                    GpuMesh::Triangles {
+                        vertices,
+                        indices,
+                        index_count,
+                        ..
+                    } => {
+                        pass.set_vertex_buffer(0, vertices.slice(..));
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..*index_count, 0, 0..1);
+                    }
+                    // 6 vertices (one quad) × one instance per segment.
+                    GpuMesh::Wide {
+                        segments, count, ..
+                    } => {
+                        pass.set_vertex_buffer(0, segments.slice(..));
+                        pass.draw(0..6, 0..*count);
+                    }
+                }
                 stats.draw_calls += 1;
             }
         } // 🦀 the pass borrows the encoder; it must end (drop) before `finish`
@@ -719,22 +823,68 @@ impl Renderer {
     }
 }
 
+/// Index of a LOD tag list in `lods` (0 = empty), adding it if new.
+fn intern_lod(lods: &mut Vec<Arc<[LodTag]>>, tags: &Arc<[LodTag]>) -> usize {
+    if tags.is_empty() {
+        return 0;
+    }
+    lods.push(Arc::clone(tags));
+    lods.len() - 1
+}
+
+/// Index of a Switch guard list in `guards` (0 = empty), adding it if new.
+fn intern_guard(guards: &mut Vec<Arc<[SwitchGuard]>>, list: &Arc<[SwitchGuard]>) -> usize {
+    if list.is_empty() {
+        return 0;
+    }
+    guards.push(Arc::clone(list));
+    guards.len() - 1
+}
+
 fn upload(device: &wgpu::Device, mesh: &Mesh) -> GpuMesh {
     let label = mesh.label.as_str();
-    GpuMesh {
-        vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let buffer = |contents: &[u8], usage| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
-        indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }),
-        index_count: mesh.indices.len() as u32,
-        topology: mesh.topology,
-        solid: mesh.solid,
+            contents,
+            usage,
+        })
+    };
+    let v = |i: u32| mesh.vertices[i as usize];
+    let segment = |a: u32, b: u32| Segment {
+        a: v(a).position,
+        b: v(b).position,
+        color_a: v(a).color,
+        color_b: v(b).color,
+    };
+    match mesh.topology {
+        Topology::Triangles => GpuMesh::Triangles {
+            vertices: buffer(
+                bytemuck::cast_slice(&mesh.vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            indices: buffer(
+                bytemuck::cast_slice(&mesh.indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: mesh.indices.len() as u32,
+            solid: mesh.solid,
+        },
+        topology => {
+            let segments: Vec<Segment> = match topology {
+                Topology::Lines => mesh
+                    .indices
+                    .chunks_exact(2)
+                    .map(|p| segment(p[0], p[1]))
+                    .collect(),
+                _ => mesh.indices.iter().map(|&i| segment(i, i)).collect(),
+            };
+            GpuMesh::Wide {
+                segments: buffer(bytemuck::cast_slice(&segments), wgpu::BufferUsages::VERTEX),
+                count: segments.len() as u32,
+                topology,
+            }
+        }
     }
 }
 

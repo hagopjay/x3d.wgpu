@@ -32,6 +32,8 @@ pub struct Stats {
     pub points: usize,
     pub lights: usize,
     pub viewpoints: usize,
+    /// ROUTEs wired into the event graph.
+    pub routes: usize,
 }
 
 impl Report {
@@ -81,14 +83,15 @@ impl fmt::Display for Report {
         let s = &self.stats;
         writeln!(
             f,
-            "shapes {}  meshes {}  triangles {}  line segments {}  points {}  lights {}  viewpoints {}",
+            "shapes {}  meshes {}  triangles {}  line segments {}  points {}  lights {}  viewpoints {}  routes {}",
             s.shapes,
             s.unique_meshes,
             s.triangles,
             s.line_segments,
             s.points,
             s.lights,
-            s.viewpoints
+            s.viewpoints,
+            s.routes
         )?;
         if !self.inlined.is_empty() {
             writeln!(
@@ -115,7 +118,7 @@ impl fmt::Display for Report {
         table("skipped (not supported yet)", &self.unsupported)?;
         table("approximated", &self.approximated)?;
         table(
-            "ignored (animation/interaction: this is a still)",
+            "ignored (interaction, and ROUTEs not followed yet)",
             &self.ignored,
         )?;
         if !self.warnings.is_empty() {

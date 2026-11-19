@@ -31,6 +31,7 @@ pub mod fields;
 pub mod geometry;
 mod parse;
 pub mod report;
+pub mod runtime;
 pub mod scene;
 
 // 🦀 Re-exports: users write `x3d_scene::Scene`, not `x3d_scene::scene::Scene`.
@@ -38,6 +39,6 @@ pub use error::{Error, Result};
 pub use parse::{LoadOptions, load, load_with, parse_str, parse_str_with};
 pub use report::{Report, Stats};
 pub use scene::{
-    Aabb, Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, TextureRef,
-    Textures, Topology, Vertex, Viewpoint,
+    Aabb, Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, SwitchGuard,
+    TextureRef, Textures, Topology, Vertex, Viewpoint,
 };

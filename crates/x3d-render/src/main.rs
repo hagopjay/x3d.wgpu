@@ -56,9 +56,12 @@ enum Command {
         /// Which <Viewpoint> (0-based). Default: the first, or frame the scene.
         #[arg(long)]
         viewpoint: Option<usize>,
-        /// A 3×2 contact sheet of every debug view instead of one image.
+        /// A contact sheet of every debug view instead of one image.
         #[arg(long)]
         sheet: bool,
+        /// Seconds after loading: TimeSensors and ROUTEs run up to this moment.
+        #[arg(long, default_value_t = 0.0)]
+        time: f64,
         #[command(flatten)]
         common: Common,
     },
@@ -115,6 +118,15 @@ struct Common {
     /// Brighten or darken PhysicalMaterial lighting (1 = as X_ITE draws it).
     #[arg(long, default_value_t = 1.0)]
     exposure: f32,
+    /// Multiply line widths and point sizes (e.g. 2 on a HiDPI screen).
+    #[arg(long, default_value_t = 1.0)]
+    line_scale: f32,
+    /// Don't draw line geometry (IndexedLineSet, LineSet).
+    #[arg(long)]
+    hide_lines: bool,
+    /// Don't draw PointSets.
+    #[arg(long)]
+    hide_points: bool,
 }
 
 impl Common {
@@ -126,7 +138,9 @@ impl Common {
             headlight: self.headlight,
             cull_back_faces: !self.no_cull,
             exposure: self.exposure,
-            ..Default::default()
+            line_scale: self.line_scale,
+            show_lines: !self.hide_lines,
+            show_points: !self.hide_points,
         }
     }
     fn load_options(&self) -> LoadOptions {
@@ -185,11 +199,14 @@ fn main() -> Result<()> {
             output,
             viewpoint,
             sheet,
+            time,
             common,
         } => {
             let t0 = Instant::now();
-            let scene = x3d_scene::load_with(&file, &common.load_options())
+            let mut scene = x3d_scene::load_with(&file, &common.load_options())
                 .with_context(|| format!("loading {}", file.display()))?;
+            // Like a browser's first frame: animations show their state at `time`.
+            scene.advance(time);
             let t_load = t0.elapsed();
             if !scene.report.is_lossless() {
                 eprint!("{}", scene.report);

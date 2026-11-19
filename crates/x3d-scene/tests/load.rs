@@ -108,7 +108,12 @@ fn lights_are_in_world_space() {
          <PointLight on='false'/>",
     ))
     .unwrap();
-    assert_eq!(s.lights.len(), 2, "lights that are off are skipped");
+    assert_eq!(
+        s.lights.len(),
+        3,
+        "lights that are off are kept (an event may turn them on)"
+    );
+    assert!(s.lights[0].on && s.lights[1].on && !s.lights[2].on);
     let LightKind::Directional { direction } = s.lights[0].kind else {
         panic!("not directional")
     };
@@ -133,12 +138,18 @@ fn navigation_info_and_viewpoint() {
 fn unsupported_nodes_are_reported_not_dropped_silently() {
     let s = parse_str(&x3d(
         "<Shape><Text string='\"hi\"'/></Shape>
-         <TimeSensor loop='true'/>
+         <TouchSensor DEF='Touch'/><TimeSensor DEF='Clock'/>
+         <ROUTE fromNode='Touch' fromField='touchTime' toNode='Clock' toField='set_startTime'/>
          <Shape><Appearance><ImageTexture url='\"a.png\"'/><Material/></Appearance><Box/></Shape>",
     ))
     .unwrap();
     assert_eq!(s.report.unsupported.get("Text"), Some(&1));
-    assert_eq!(s.report.ignored.get("TimeSensor"), Some(&1));
+    assert_eq!(
+        s.report.ignored.get("ROUTE from TouchSensor"),
+        Some(&1),
+        "{:?}",
+        s.report.ignored
+    );
     assert!(
         s.report
             .unsupported

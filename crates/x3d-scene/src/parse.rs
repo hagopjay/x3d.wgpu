@@ -10,7 +10,7 @@
 //! (it's someone else's type), but we *can* define our own trait
 //! ([`NodeExt`]) and implement it for their type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,9 +20,13 @@ use roxmltree::{Document, Node, NodeId};
 use crate::error::{Error, Result};
 use crate::fields::FieldValue;
 use crate::geometry::{self, IndexError, Parts, Polygons};
+use crate::runtime::{
+    AnimNode, Behaviour, KeyValues, Local, Route, Target, TextureTransform2D, TransformNode, Trs,
+    field_name,
+};
 use crate::scene::{
-    Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, TextureRef, Textures,
-    Topology, Viewpoint,
+    Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, SwitchGuard,
+    TextureRef, Textures, Topology, Viewpoint,
 };
 
 /// Knobs for loading.
@@ -167,6 +171,7 @@ fn parse_inner(
 
     let mut loader = Loader::new(&doc, opts, dir, state);
     loader.children(scene_el, Mat4::IDENTITY, 0)?;
+    loader.wire_routes(&doc);
     Ok(loader.finish())
 }
 
@@ -302,6 +307,21 @@ struct Loader<'a, 'i> {
     lod: Vec<LodTag>,
     /// The light scopes we are inside right now.
     scopes: Vec<u32>,
+
+    // --- for animation ---
+    /// The transform node we are inside (`Scene::nodes`); the root is 0.
+    node_stack: Vec<u32>,
+    /// Animated Switches we are inside.
+    switch_guards: Vec<SwitchGuard>,
+    /// DEF names some ROUTE writes to: only those Switches stay dynamic.
+    route_targets: HashSet<&'a str>,
+    /// (Appearance, lines-or-points) → index into `Scene::materials`.
+    material_ids: HashMap<(Option<NodeId>, bool), u32>,
+    /// Which scene parts each X3D node turned into, for ROUTE targets.
+    users: HashMap<NodeId, Vec<u32>>,
+    texture_transforms: HashMap<NodeId, (Vec<u32>, TextureTransform2D)>,
+    /// X3D node → its node in `Scene::animation`.
+    anim_ids: HashMap<NodeId, u32>,
 }
 
 impl<'a, 'i> Loader<'a, 'i> {
@@ -316,10 +336,16 @@ impl<'a, 'i> Loader<'a, 'i> {
             .descendants()
             .filter_map(|n| n.attribute("DEF").map(|d| (d, n)))
             .collect();
-        let scene = Scene {
+        let mut scene = Scene {
             headlight: true,
             ..Default::default()
         };
+        scene.nodes.push(TransformNode::root());
+        let route_targets = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("ROUTE"))
+            .filter_map(|n| n.attribute("toNode"))
+            .collect();
         Self {
             defs,
             opts,
@@ -331,7 +357,27 @@ impl<'a, 'i> Loader<'a, 'i> {
             seen_background: false,
             lod: Vec::new(),
             scopes: Vec::new(),
+            node_stack: vec![0],
+            switch_guards: Vec::new(),
+            route_targets,
+            material_ids: HashMap::new(),
+            users: HashMap::new(),
+            texture_transforms: HashMap::new(),
+            anim_ids: HashMap::new(),
         }
+    }
+
+    /// The transform node we are inside.
+    fn node(&self) -> u32 {
+        *self
+            .node_stack
+            .last()
+            .expect("the root node is never popped")
+    }
+
+    /// Remember that X3D node `n` became scene part `id` (for ROUTEs).
+    fn used_as(&mut self, n: Node<'a, 'i>, id: u32) {
+        self.users.entry(n.id()).or_default().push(id);
     }
 
     /// Follow `USE='name'` to the node that `DEF`ined it.
@@ -389,8 +435,21 @@ impl<'a, 'i> Loader<'a, 'i> {
         let name = n.name();
         match name {
             "Transform" => {
-                let local = transform_matrix(n)?;
-                self.children(n, world * local, depth)
+                // Every Transform *instance* becomes a node in the transform
+                // tree, so a ROUTE can move it (and everything under it) later.
+                let trs = trs_of(n)?;
+                let world = world * trs.matrix();
+                let id = self.scene.nodes.len() as u32;
+                self.scene.nodes.push(TransformNode {
+                    parent: Some(self.node()),
+                    local: Local::Trs(trs),
+                    world,
+                });
+                self.used_as(n, id);
+                self.node_stack.push(id);
+                let result = self.children(n, world, depth);
+                self.node_stack.pop();
+                result
             }
             _ if GROUPS.contains(&name) => self.children(n, world, depth),
             "Billboard" => {
@@ -424,6 +483,25 @@ impl<'a, 'i> Loader<'a, 'i> {
                 // whichChoice = -1 shows nothing. (X3D 4 calls the field `children`, X3D 3 `choice`;
                 // in XML both are just child elements.)
                 let choice: i32 = n.field_or("whichChoice", -1)?;
+                if n.attribute("DEF")
+                    .is_some_and(|d| self.route_targets.contains(d))
+                {
+                    // A ROUTE can change whichChoice: keep every child, each
+                    // guarded by "this Switch is on child i".
+                    let id = self.scene.switches.len() as u32;
+                    self.scene.switches.push(choice);
+                    self.used_as(n, id);
+                    for (i, child) in elements(n).enumerate() {
+                        self.switch_guards.push(SwitchGuard {
+                            switch: id,
+                            child: i as u32,
+                        });
+                        let result = self.visit(child, world, depth + 1);
+                        self.switch_guards.pop();
+                        result?;
+                    }
+                    return Ok(());
+                }
                 match usize::try_from(choice)
                     .ok()
                     .and_then(|i| elements(n).nth(i))
@@ -450,10 +528,8 @@ impl<'a, 'i> Loader<'a, 'i> {
             }
             "Background" => self.background(n),
             "Inline" => self.inline(n, world),
-            _ if is_behaviour(name) => {
-                self.scene.report.ignored(name);
-                Ok(())
-            }
+            // TimeSensors, interpolators… are wired up from the ROUTEs at the end.
+            _ if is_behaviour(name) => Ok(()),
             _ if is_silent(name) => Ok(()),
             other => {
                 self.scene.report.unsupported(other);
@@ -480,13 +556,16 @@ impl<'a, 'i> Loader<'a, 'i> {
         let Some(mesh) = self.mesh_for(g)? else {
             return Ok(());
         };
-        let material = self.material(appearance, &mesh)?;
+        let material_id = self.material_id(appearance, &mesh)?;
         self.scene.draws.push(Draw {
             lod: self.lod.as_slice().into(),
             scopes: self.scopes.as_slice().into(),
+            node: self.node(),
+            material: self.scene.materials[material_id as usize].clone(),
+            material_id,
+            switches: self.switch_guards.as_slice().into(),
             mesh,
             transform: world,
-            material,
         });
         Ok(())
     }
@@ -840,6 +919,54 @@ impl<'a, 'i> Loader<'a, 'i> {
 
     // --- Appearance --------------------------------------------------------
 
+    /// The material-table entry for an Appearance (shared by every Shape
+    /// that USEs it, so one event recolours them all).
+    fn material_id(&mut self, appearance: Option<Node<'a, 'i>>, mesh: &Mesh) -> Result<u32> {
+        let key = (
+            appearance.map(|a| a.id()),
+            mesh.topology != Topology::Triangles,
+        );
+        if let Some(&id) = self.material_ids.get(&key) {
+            return Ok(id);
+        }
+        let material = self.material(appearance, mesh)?;
+        let id = self.scene.materials.len() as u32;
+        self.scene.materials.push(material);
+        self.material_ids.insert(key, id);
+        if let Some(app) = appearance {
+            const MATERIALS: &[&str] = &[
+                "Material",
+                "UnlitMaterial",
+                "PhysicalMaterial",
+                "TwoSidedMaterial",
+            ];
+            if let Some(m) = self.child(app, MATERIALS)? {
+                self.used_as(m, id);
+            }
+            if let Some(mut t) = self.child(app, &["TextureTransform", "MultiTextureTransform"])? {
+                if t.has_tag_name("MultiTextureTransform") {
+                    if let Some(first) = elements(t).next() {
+                        t = self.resolve(first)?;
+                    }
+                }
+                if t.has_tag_name("TextureTransform") {
+                    let fields = TextureTransform2D {
+                        center: t.field_or("center", Vec2::ZERO)?,
+                        rotation: t.field_or("rotation", 0.0)?,
+                        scale: t.field_or("scale", Vec2::ONE)?,
+                        translation: t.field_or("translation", Vec2::ZERO)?,
+                    };
+                    self.texture_transforms
+                        .entry(t.id())
+                        .or_insert_with(|| (Vec::new(), fields))
+                        .0
+                        .push(id);
+                }
+            }
+        }
+        Ok(id)
+    }
+
     fn material(&mut self, appearance: Option<Node<'a, 'i>>, mesh: &Mesh) -> Result<Material> {
         let lines_or_points = mesh.topology != Topology::Triangles;
         let Some(app) = appearance else {
@@ -852,11 +979,6 @@ impl<'a, 'i> Loader<'a, 'i> {
                     self.scene
                         .report
                         .unsupported(&format!("{} (custom shaders)", c.name()));
-                }
-                "LineProperties" | "PointProperties" => {
-                    self.scene
-                        .report
-                        .approximated(&format!("{} (lines and points are 1 px)", c.name()));
                 }
                 _ => {}
             }
@@ -892,6 +1014,16 @@ impl<'a, 'i> Loader<'a, 'i> {
             }
         }
         out.texture_matrix = self.texture_matrix(app)?;
+        // Line width / point size (X3D: a multiple of the 1 px nominal size).
+        if let Some(p) = self.child(app, &["LineProperties", "PointProperties"])? {
+            let (field, applied) = match p.name() {
+                "LineProperties" => ("linewidthScaleFactor", p.field_or("applied", true)?),
+                _ => ("pointSizeScaleFactor", true),
+            };
+            if applied {
+                out.line_width = p.field_or(field, 1.0f32)?.max(1.0);
+            }
+        }
 
         if lines_or_points {
             // X3D: lines and points are unlit, drawn in emissiveColor.
@@ -1119,36 +1251,34 @@ impl<'a, 'i> Loader<'a, 'i> {
             }
         };
         let scopes = self.scopes.clone();
-        self.scene.splice(&child, world, &scopes, &name);
+        self.scene
+            .splice(&child, world, self.node(), &scopes, &name);
         Ok(())
     }
 
     // --- Environment -------------------------------------------------------
 
     fn light(&mut self, n: Node<'a, 'i>, world: Mat4) -> Result<()> {
-        if !n.field_or("on", true)? {
-            return Ok(());
-        }
+        let on = n.field_or("on", true)?;
         let color = n.field_or("color", Vec3::ONE)?;
         let intensity = n.field_or("intensity", 1.0)?;
         let ambient_intensity = n.field_or("ambientIntensity", 0.0)?;
-        let (scale, _, _) = world.to_scale_rotation_translation();
-        let radius_scale = scale.max_element();
-        let dir = |v: Vec3| world.transform_vector3(v).normalize_or(Vec3::NEG_Z);
-        let kind = match n.name() {
+        // Kept in the light's own space (events change these fields);
+        // `kind` is the same light placed in the world.
+        let local = match n.name() {
             "DirectionalLight" => LightKind::Directional {
-                direction: dir(n.field_or("direction", Vec3::NEG_Z)?),
+                direction: n.field_or("direction", Vec3::NEG_Z)?,
             },
             "PointLight" => LightKind::Point {
-                location: world.transform_point3(n.field_or("location", Vec3::ZERO)?),
+                location: n.field_or("location", Vec3::ZERO)?,
                 attenuation: n.field_or("attenuation", Vec3::X)?,
-                radius: n.field_or("radius", 100.0)? * radius_scale,
+                radius: n.field_or("radius", 100.0)?,
             },
             _ => LightKind::Spot {
-                location: world.transform_point3(n.field_or("location", Vec3::ZERO)?),
-                direction: dir(n.field_or("direction", Vec3::NEG_Z)?),
+                location: n.field_or("location", Vec3::ZERO)?,
+                direction: n.field_or("direction", Vec3::NEG_Z)?,
                 attenuation: n.field_or("attenuation", Vec3::X)?,
-                radius: n.field_or("radius", 100.0)? * radius_scale,
+                radius: n.field_or("radius", 100.0)?,
                 beam_width: n.field_or("beamWidth", std::f32::consts::FRAC_PI_4)?,
                 cut_off_angle: n.field_or("cutOffAngle", std::f32::consts::FRAC_PI_2)?,
             },
@@ -1161,13 +1291,18 @@ impl<'a, 'i> Loader<'a, 'i> {
         } else {
             self.scopes.last().copied()
         };
+        let id = self.scene.lights.len() as u32;
         self.scene.lights.push(Light {
-            kind,
+            kind: local.transformed(&world),
+            local,
             color,
             intensity,
             ambient_intensity,
             scope,
+            on,
+            node: self.node(),
         });
+        self.used_as(n, id);
         Ok(())
     }
 
@@ -1222,6 +1357,114 @@ impl<'a, 'i> Loader<'a, 'i> {
         Ok(())
     }
 
+    // --- ROUTEs -------------------------------------------------------------
+
+    /// Turn every ROUTE into an edge of the event graph. Routes whose ends
+    /// we can't animate are counted in the report.
+    fn wire_routes(&mut self, doc: &'a Document<'i>) {
+        let inside_proto = |n: &Node| n.ancestors().any(|a| a.has_tag_name("ProtoDeclare"));
+        for r in doc
+            .descendants()
+            .filter(|n| n.has_tag_name("ROUTE") && !inside_proto(n))
+        {
+            let (Some(from), Some(from_field), Some(to), Some(to_field)) = (
+                r.attribute("fromNode"),
+                r.attribute("fromField"),
+                r.attribute("toNode"),
+                r.attribute("toField"),
+            ) else {
+                continue;
+            };
+            let kind = |def: &str| self.defs.get(def).map_or("?", |n| n.tag_name().name());
+            let (from_kind, to_kind) = (kind(from), kind(to));
+            match (self.anim_node(from), self.anim_node(to)) {
+                (Some(from), Some(to)) => self.scene.animation.routes.push(Route {
+                    from,
+                    from_field: field_name(from_field).to_owned(),
+                    to,
+                    to_field: field_name(to_field).to_owned(),
+                }),
+                (None, _) => self
+                    .scene
+                    .report
+                    .ignored(&format!("ROUTE from {from_kind}")),
+                (_, None) => self
+                    .scene
+                    .report
+                    .ignored(&format!("ROUTE to {to_kind}.{}", field_name(to_field))),
+            }
+        }
+    }
+
+    /// The event-graph node for a DEF name, created on first use.
+    fn anim_node(&mut self, def: &str) -> Option<u32> {
+        let n = *self.defs.get(def)?;
+        if let Some(&id) = self.anim_ids.get(&n.id()) {
+            return Some(id);
+        }
+        // Lenient: a field that doesn't parse falls back to its default.
+        let key: Vec<f32> = n.field_or("key", Vec::new()).unwrap_or_default();
+        let interp = |values| {
+            AnimNode::Behaviour(Behaviour::Interpolator {
+                key: key.clone(),
+                values,
+            })
+        };
+        let values = |n: Node<'a, 'i>| -> Option<KeyValues> {
+            Some(match n.name() {
+                "ScalarInterpolator" => KeyValues::Float(n.field_or("keyValue", Vec::new()).ok()?),
+                "PositionInterpolator" => KeyValues::Vec3(n.field_or("keyValue", Vec::new()).ok()?),
+                "PositionInterpolator2D" => {
+                    KeyValues::Vec2(n.field_or("keyValue", Vec::new()).ok()?)
+                }
+                "ColorInterpolator" => KeyValues::Color(n.field_or("keyValue", Vec::new()).ok()?),
+                "OrientationInterpolator" => {
+                    KeyValues::Rotation(n.field_or("keyValue", Vec::new()).ok()?)
+                }
+                "IntegerSequencer" => KeyValues::Int(n.field_or("keyValue", Vec::new()).ok()?),
+                "BooleanSequencer" => KeyValues::Bool(n.field_or("keyValue", Vec::new()).ok()?),
+                _ => return None,
+            })
+        };
+        let users = self.users.get(&n.id()).cloned().unwrap_or_default();
+        let node = if let Some(v) = values(n) {
+            interp(v)
+        } else {
+            match n.name() {
+                "TimeSensor" => AnimNode::Behaviour(Behaviour::TimeSensor {
+                    cycle: f64::from(n.field_or("cycleInterval", 1.0f32).unwrap_or(1.0)),
+                    looping: n.field_or("loop", false).unwrap_or(false),
+                    start: n.field_or("startTime", 0.0f64).unwrap_or(0.0),
+                    stop: n.field_or("stopTime", 0.0f64).unwrap_or(0.0),
+                    enabled: n.field_or("enabled", true).unwrap_or(true),
+                    active: false,
+                }),
+                "BooleanFilter" => AnimNode::Behaviour(Behaviour::BooleanFilter),
+                "BooleanToggle" => AnimNode::Behaviour(Behaviour::BooleanToggle {
+                    state: n.field_or("toggle", false).unwrap_or(false),
+                }),
+                "Transform" => AnimNode::Target(Target::Transform(users)),
+                "Material" | "UnlitMaterial" | "PhysicalMaterial" | "TwoSidedMaterial" => {
+                    AnimNode::Target(Target::Material(users))
+                }
+                "DirectionalLight" | "PointLight" | "SpotLight" => {
+                    AnimNode::Target(Target::Light(users))
+                }
+                "Switch" => AnimNode::Target(Target::Switch(users)),
+                "TextureTransform" => {
+                    let (materials, fields) = self.texture_transforms.get(&n.id()).cloned()?;
+                    AnimNode::Target(Target::TextureTransform { materials, fields })
+                }
+                _ => return None,
+            }
+        };
+        let id = self.scene.animation.nodes.len() as u32;
+        self.scene.animation.nodes.push(node);
+        self.scene.animation.names.push(def.to_owned());
+        self.anim_ids.insert(n.id(), id);
+        Some(id)
+    }
+
     fn finish(mut self) -> Scene {
         let s = &mut self.scene;
         let mut stats = s.report.stats;
@@ -1237,6 +1480,7 @@ impl<'a, 'i> Loader<'a, 'i> {
         }
         stats.lights = s.lights.len();
         stats.viewpoints = s.viewpoints.len();
+        stats.routes = s.animation.routes.len();
         s.report.stats = stats;
         self.scene
     }
@@ -1260,17 +1504,13 @@ fn to_faces(index: &[i32]) -> Vec<Vec<u32>> {
         .collect()
 }
 
-/// X3D's Transform: `T · C · R · SR · S · SR⁻¹ · C⁻¹`.
-fn transform_matrix(n: Node<'_, '_>) -> Result<Mat4> {
-    let t: Vec3 = n.field_or("translation", Vec3::ZERO)?;
-    let r: Quat = n.field_or("rotation", Quat::IDENTITY)?;
-    let s: Vec3 = n.field_or("scale", Vec3::ONE)?;
-    let sr: Quat = n.field_or("scaleOrientation", Quat::IDENTITY)?;
-    let c: Vec3 = n.field_or("center", Vec3::ZERO)?;
-    Ok(Mat4::from_translation(t + c)
-        * Mat4::from_quat(r)
-        * Mat4::from_quat(sr)
-        * Mat4::from_scale(s)
-        * Mat4::from_quat(sr.inverse())
-        * Mat4::from_translation(-c))
+/// A Transform's fields (its matrix is [`Trs::matrix`]).
+fn trs_of(n: Node<'_, '_>) -> Result<Trs> {
+    Ok(Trs {
+        translation: n.field_or("translation", Vec3::ZERO)?,
+        rotation: n.field_or("rotation", Quat::IDENTITY)?,
+        scale: n.field_or("scale", Vec3::ONE)?,
+        scale_orientation: n.field_or("scaleOrientation", Quat::IDENTITY)?,
+        center: n.field_or("center", Vec3::ZERO)?,
+    })
 }
