@@ -173,12 +173,41 @@ impl Mesh {
     }
 }
 
-/// An image file used as a texture, already resolved to a path on disk.
+/// An image used as a texture: a file resolved on disk, or the bytes of a
+/// `data:` url (then `path` is just a label, `data:<hash>`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextureRef {
     pub path: PathBuf,
     pub repeat_s: bool,
     pub repeat_t: bool,
+    /// Decoded `data:` url bytes (PNG/JPEG), when the image is inline.
+    pub inline: Option<std::sync::Arc<[u8]>>,
+}
+
+/// Six images, one per cube face (X3D `ComposedCubeMapTexture`), in the
+/// order +X (right), −X (left), +Y (top), −Y (bottom), +Z (front... see below).
+///
+/// X3D names the faces from a viewer looking down −Z: `front` is −Z,
+/// `back` +Z, `left` −X, `right` +X, `top` +Y, `bottom` −Y.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeMap {
+    /// +X, −X, +Y, −Y, +Z, −Z (the GPU's cube-face order).
+    pub faces: [TextureRef; 6],
+}
+
+/// X3D 4 `EnvironmentLight`: light from all around, given as cube maps
+/// (image-based lighting). Only physically based materials receive it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Environment {
+    pub color: Vec3,
+    pub intensity: f32,
+    pub on: bool,
+    /// Rotates the environment (applied to lookup directions).
+    pub rotation: glam::Quat,
+    /// For diffuse light (irradiance). If missing, `specular` is used.
+    pub diffuse: Option<CubeMap>,
+    /// For reflections (prefiltered by roughness). If missing, `diffuse`.
+    pub specular: Option<CubeMap>,
 }
 
 /// The texture slots of X3D 4 materials. `None` = no texture in that slot.
@@ -544,6 +573,8 @@ pub struct Scene {
     pub lights: Vec<Light>,
     pub viewpoints: Vec<Viewpoint>,
     pub background: Background,
+    /// The first `EnvironmentLight` (image-based lighting), if any.
+    pub environment: Option<Environment>,
     /// NavigationInfo `headlight` (true unless a scene turns it off).
     pub headlight: bool,
     pub report: Report,

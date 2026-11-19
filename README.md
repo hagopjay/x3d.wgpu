@@ -36,7 +36,8 @@ see [below](#a-hard-one-giza-v21)) and the **animated, custom-shaded Gobbler 3**
 | Lines & points | IndexedLineSet, LineSet, PointSet drawn as screen-space quads, so **LineProperties `linewidthScaleFactor`** and **PointProperties** sizes work (and lines behind the camera clip cleanly) |
 | Animation | **TimeSensor**, Scalar / Position / Position2D / Color (HSV) / Orientation (slerp) interpolators, Integer & Boolean sequencers, BooleanFilter, BooleanToggle, **ROUTEs** into Transforms, Materials, Lights, Switches, TextureTransforms, shader fields; Viewpoint `bindTime` |
 | Shaders | **ComposedShader** with GLSL ShaderParts (X_ITE's GLSL ES 300 dialect, inline CDATA, `data:` or files), translated to Vulkan GLSL and validated by **naga**; `field`s become a uniform block, plus X_ITE's built-ins (`x3d_ModelViewMatrix`, `x3d_Viewport`, …) and point sprites |
-| Environment | Viewpoint, NavigationInfo `headlight`, Background (zenith colour) |
+| Environment | Viewpoint, NavigationInfo `headlight`, Background (zenith colour), **EnvironmentLight** (X3D 4.1 image-based lighting from a `ComposedCubeMapTexture`: SH9 irradiance + GGX-prefiltered mips + multiple-scattering compensation; matches X_ITE's white-furnace measurements to the byte with `--encode gamma22`, see [RESEARCH-ibl.md](RESEARCH-ibl.md)) |
+| Images | files, and `data:…;base64` urls (no folder needed) |
 | Extras (off by default) | **HDR** with ACES or AgX tone mapping, **bloom**, **sun shadows** from the first DirectionalLight |
 | Reuse | `DEF`/`USE` anywhere, across Inlines too. Shared geometry is tessellated and uploaded **once**. |
 
@@ -71,7 +72,8 @@ Shared options: `--backend auto|vulkan|metal|dx12|gl`, `--size 1920x1080`, `--ms
 `--exposure 1.0`, `--wireframe`, `--headlight true|false`, `--no-cull`, `--segments 48`, `--strict`,
 `--load-all-inlines`, `--line-scale 1.0`, `--hide-lines`, `--hide-points`,
 `--tone-map off|aces|agx`, `--bloom 0.15`, `--bloom-threshold 0.8`, `--shadows`, `--cull off|cpu|gpu`,
-`--profile auto|weak` (`weak` emulates a WebGL2-class GPU: downlevel limits, no optional features).
+`--profile auto|weak` (`weak` emulates a WebGL2-class GPU: downlevel limits, no optional features),
+`--ibl single|split|multi` (EnvironmentLight energy model), `--encode srgb|gamma22` (`gamma22` = X_ITE's output curve).
 
 ### Viewer controls
 
@@ -137,6 +139,16 @@ only if X_ITE would blend it: a transparent material, a texture with alpha, or `
 
 Not run yet: TouchSensor and ParticleSystem (counted in `info`).
 
+## Image-based lighting
+
+![09_environment.x3d: gold metal (top) and red plastic (bottom), roughness 0 → 1, lit only by an EnvironmentLight sky](docs/environment.png)
+
+`EnvironmentLight` lights PhysicalMaterials from a cube map. `environment.rs` does the
+integrals once on the CPU: 9 spherical-harmonic coefficients for diffuse light, and a GGX
+blur per roughness level stored as mips for reflections. Against 26 X_ITE white-furnace
+measurements, the multiple-scattering model is within 2 bytes everywhere, and within 1 with
+X_ITE's own 2.2 encode ([RESEARCH-ibl.md](RESEARCH-ibl.md)).
+
 ## Lighting extras
 
 ![Still life and terrain: plain (left), and with --shadows --tone-map agx --exposure 1.4 (right)](docs/lighting.png)
@@ -186,7 +198,7 @@ All three are **off by default**, so pictures still match X_ITE.
   resolved to file paths here; decoding them is the renderer's job.
 - **`crates/x3d-render`** — the wgpu renderer, the `x3d-view` binary, the
   hello-triangle example, and pixel-checking GPU tests.
-- **`scenes/`** — eight sample scenes, from "four primitives" to "what gets skipped".
+- **`scenes/`** — nine sample scenes, from "four primitives" to "what gets skipped" and an EnvironmentLight material sweep (`09_environment.x3d`).
 
 ### Colour: display vs linear
 
@@ -206,7 +218,7 @@ copes with sRGB swapchain formats, by handing them linear values.
 ## Testing
 
 ```sh
-cargo test --workspace          # 109 tests: unit, integration, property, doc, GPU pixel, golden, conformance
+cargo test --workspace          # 117 tests: unit, integration, property, doc, GPU pixel, golden, conformance
 X3D_REQUIRE_GPU=1 cargo test --workspace   # what CI runs: no adapter is a failure, not a skip
 X3D_BLESS=1 cargo test -p x3d-render --test golden   # re-bless golden images on this adapter
 cargo clippy --workspace --all-targets -- -D warnings

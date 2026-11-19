@@ -220,3 +220,25 @@ fn scoped_lights_only_reach_their_group() {
     assert!(torch.reaches(&shaft_box.scopes));
     assert!(!torch.reaches(&sphere.scopes), "the torch must not light the sphere");
 }
+
+#[test]
+fn data_urls_and_environment_lights_load_without_a_folder() {
+    // A 1×1 white PNG as a data: url, six times, inside an EnvironmentLight.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/58BAwAI/AL+hc2rNAAAAABJRU5ErkJggg==";
+    let faces: String = ["front", "back", "left", "right", "top", "bottom"]
+        .iter()
+        .map(|f| format!("<ImageTexture containerField='{f}Texture' url='\"data:image/png;base64,{png}\"'/>"))
+        .collect();
+    let s = x3d_scene::parse_str(&format!(
+        "<X3D><Scene><EnvironmentLight intensity='0.5' color='1 0.5 0.25'>
+           <ComposedCubeMapTexture containerField='diffuseTexture'>{faces}</ComposedCubeMapTexture>
+         </EnvironmentLight></Scene></X3D>"
+    ))
+    .unwrap();
+    let env = s.environment.as_ref().expect("an environment");
+    assert_eq!(env.intensity, 0.5);
+    let cube = env.diffuse.as_ref().unwrap();
+    assert!(cube.faces.iter().all(|f| f.inline.as_ref().is_some_and(|b| b.starts_with(b"\x89PNG"))));
+    assert!(env.specular.is_none(), "the renderer falls back to the diffuse cube");
+    assert!(s.report.is_lossless(), "{}", s.report);
+}

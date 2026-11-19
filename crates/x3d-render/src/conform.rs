@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::gpu::{Gpu, describe};
 use crate::headless::{Shot, render_scene};
-use crate::renderer::RenderSettings;
+use crate::renderer::{Encode, RenderSettings};
 
 #[derive(Debug, Clone)]
 pub struct RowResult {
@@ -29,6 +29,8 @@ pub struct RowResult {
     pub got: Option<[u8; 3]>,
     pub max_delta: u8,
     pub delta: Option<u8>,
+    /// The same row rendered with X_ITE's encode (`--encode gamma22`).
+    pub got_gamma22: Option<[u8; 3]>,
     /// "pass", "fail", "invalid scene", "stale validation", "not run"
     pub verdict: String,
     pub source: String,
@@ -48,20 +50,26 @@ impl Receipt {
 
     pub fn table(&self) -> String {
         let mut s = format!(
-            "{:<34} {:<9} {:>13} {:>13} {:>4} {:>4}  {:<16} expected from\n",
-            "row", "probe", "expected", "got", "|Δ|", "tol", "verdict"
+            "{:<30} {:<9} {:>11} {:>11} {:>4} {:>4} {:>11} {:>5}  {:<16} expected from\n",
+            "row", "probe", "expected", "got", "|Δ|", "tol", "got γ2.2", "|Δ|", "verdict"
         );
         for r in &self.rows {
             let rgb = |c: [u8; 3]| format!("{},{},{}", c[0], c[1], c[2]);
             writeln!(
                 s,
-                "{:<34} {:<9} {:>13} {:>13} {:>4} {:>4}  {:<16} {}",
+                "{:<30} {:<9} {:>11} {:>11} {:>4} {:>4} {:>11} {:>5}  {:<16} {}",
                 r.id,
                 r.probe,
                 rgb(r.expected),
                 r.got.map_or("—".into(), rgb),
                 r.delta.map_or("—".into(), |d| d.to_string()),
                 r.max_delta,
+                r.got_gamma22.map_or("—".into(), rgb),
+                r.got_gamma22.map_or("—".into(), |g| (0..3)
+                    .map(|c| g[c].abs_diff(r.expected[c]))
+                    .max()
+                    .unwrap_or(0)
+                    .to_string()),
                 r.verdict,
                 r.source
             )
@@ -141,6 +149,7 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             verdict = "invalid scene".into();
             detail = format!("{validator_name}: {validation}");
         }
+        let mut got_gamma22 = None;
         let (got, delta) = if verdict.is_empty() {
             let scene = x3d_scene::load(&scene_path)?;
             let size = row["size"].as_array().map_or((128, 128), |s| {
@@ -152,6 +161,8 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             let shot = Shot { size, msaa: 1, settings: RenderSettings::default(), viewpoint: None };
             let img = render_scene(gpu, &scene, &shot)?;
             let got = probe(&img, &probe_name);
+            let g22 = Shot { settings: RenderSettings { encode: Encode::Gamma22, ..Default::default() }, ..shot };
+            got_gamma22 = Some(probe(&render_scene(gpu, &scene, &g22)?, &probe_name));
             let delta = (0..3).map(|c| got[c].abs_diff(exp[c])).max().unwrap_or(0);
             verdict = if delta <= max_delta { "pass" } else { "fail" }.into();
             (Some(got), Some(delta))
@@ -161,12 +172,23 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
         json_rows.push(json!({
             "id": id, "scene": scene_rel, "scene_sha256": sha, "probe": probe_name,
             "expected": exp, "expected_from": {"source": sources[source_key], "row": row["source_row"]},
-            "got": got, "got_from": describe(&gpu.adapter.get_info()),
+            "got": got, "got_gamma22": got_gamma22, "got_from": describe(&gpu.adapter.get_info()),
             "abs_delta_max": delta, "max_delta": max_delta, "why_tolerance": row["why_tolerance"],
             "validated_by": {"validator": validator, "verdict": validation},
             "verdict": verdict, "detail": detail,
         }));
-        rows.push(RowResult { id, probe: probe_name, expected: exp, got, max_delta, delta, verdict, source, detail });
+        rows.push(RowResult {
+            id,
+            probe: probe_name,
+            expected: exp,
+            got,
+            max_delta,
+            delta,
+            got_gamma22,
+            verdict,
+            source,
+            detail,
+        });
     }
     for row in expected["not_run"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let id = row["id"].as_str().unwrap_or("?").to_string();
@@ -180,6 +202,7 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             got: None,
             max_delta: 0,
             delta: None,
+            got_gamma22: None,
             verdict: "not run".into(),
             source: format!(
                 "{} #{}",

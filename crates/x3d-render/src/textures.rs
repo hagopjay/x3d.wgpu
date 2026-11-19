@@ -13,7 +13,7 @@
 //! stays sharp. Giza's terrain asks for it (`anisotropicDegree='16'`).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use x3d_scene::Textures;
@@ -121,7 +121,7 @@ impl TextureCache {
             texture_bits::EMISSIVE,
         ];
         for (slot, bit) in textures.slots().into_iter().zip(flags) {
-            let loaded = slot.and_then(|t| self.image(&t.path));
+            let loaded = slot.and_then(|t| self.image(t));
             if let Some(t) = &loaded {
                 bits |= bit;
                 // Only the base colour's alpha makes a surface see-through.
@@ -148,11 +148,17 @@ impl TextureCache {
         set
     }
 
-    fn image(&mut self, path: &Path) -> Option<Arc<GpuTexture>> {
+    fn image(&mut self, t: &x3d_scene::TextureRef) -> Option<Arc<GpuTexture>> {
+        let path = t.path.as_path();
         if let Some(cached) = self.images.get(path) {
             return cached.clone();
         }
-        let loaded = match image::open(path) {
+        // `data:` urls arrive decoded; files are read here.
+        let decoded = match &t.inline {
+            Some(bytes) => image::load_from_memory(bytes),
+            None => image::open(path),
+        };
+        let loaded = match decoded {
             Ok(img) => {
                 let label = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 Some(Arc::new(upload(&self.device, &self.queue, img.to_rgba8(), &label)))

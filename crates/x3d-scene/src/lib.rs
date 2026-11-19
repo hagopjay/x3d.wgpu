@@ -39,6 +39,6 @@ pub use error::{Error, Result};
 pub use parse::{LoadOptions, load, load_with, parse_str, parse_str_with};
 pub use report::{Report, Stats};
 pub use scene::{
-    Aabb, Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource, SwitchGuard,
-    TextureRef, Textures, Topology, Vertex, Viewpoint,
+    Aabb, Background, CubeMap, Draw, Environment, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
+    SwitchGuard, TextureRef, Textures, Topology, Vertex, Viewpoint,
 };

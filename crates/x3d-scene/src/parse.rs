@@ -24,8 +24,8 @@ use crate::runtime::{
     AnimNode, Behaviour, KeyValues, Local, Route, Target, TextureTransform2D, TransformNode, Trs, Value, field_name,
 };
 use crate::scene::{
-    Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource, SwitchGuard, TextureRef,
-    Textures, Topology, Viewpoint,
+    Background, CubeMap, Draw, Environment, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
+    SwitchGuard, TextureRef, Textures, Topology, Viewpoint,
 };
 
 /// Knobs for loading.
@@ -426,6 +426,7 @@ impl<'a, 'i> Loader<'a, 'i> {
                 other => other,
             },
             "DirectionalLight" | "PointLight" | "SpotLight" => self.light(n, world),
+            "EnvironmentLight" => self.environment_light(n),
             "Viewpoint" | "OrthoViewpoint" => self.viewpoint(n, world),
             "NavigationInfo" => {
                 if !std::mem::replace(&mut self.seen_navigation, true) {
@@ -995,11 +996,23 @@ impl<'a, 'i> Loader<'a, 'i> {
             self.scene.report.unsupported(&format!("{} (only ImageTexture so far)", el.name()));
             return Ok(None);
         }
+        let urls: Vec<String> = el.field_or("url", Vec::new())?;
+        // 🦀 `data:` urls carry the image itself (base64), no folder needed.
+        if let Some(bytes) = urls.iter().find_map(|u| data_url_bytes(u)) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            return Ok(Some(TextureRef {
+                path: PathBuf::from(format!("data:{:016x}", h.finish())),
+                repeat_s: el.field_or("repeatS", true)?,
+                repeat_t: el.field_or("repeatT", true)?,
+                inline: Some(bytes.into()),
+            }));
+        }
         let Some(dir) = self.dir else {
             self.scene.report.unsupported("ImageTexture (no folder: the scene was parsed from a string)");
             return Ok(None);
         };
-        let urls: Vec<String> = el.field_or("url", Vec::new())?;
         let found = urls
             .iter()
             .filter(|u| !u.contains("://") && !u.starts_with("data:"))
@@ -1013,7 +1026,64 @@ impl<'a, 'i> Loader<'a, 'i> {
             path: path.canonicalize().unwrap_or(path),
             repeat_s: el.field_or("repeatS", true)?,
             repeat_t: el.field_or("repeatT", true)?,
+            inline: None,
         }))
+    }
+
+    /// `ComposedCubeMapTexture` → six faces in GPU order (+X −X +Y −Y +Z −Z).
+    /// X3D 4 field names (`frontTexture`…) and X3D 3 ones (`front`…) both work.
+    fn cube_map(&mut self, el: Node<'a, 'i>) -> Result<Option<CubeMap>> {
+        if !el.has_tag_name("ComposedCubeMapTexture") {
+            self.scene.report.unsupported(&format!("{} (only ComposedCubeMapTexture so far)", el.name()));
+            return Ok(None);
+        }
+        // X3D: front = −Z, back = +Z, left = −X, right = +X, top = +Y, bottom = −Y.
+        let order = ["right", "left", "top", "bottom", "back", "front"];
+        let mut faces = Vec::with_capacity(6);
+        for face in order {
+            let long = format!("{face}Texture");
+            let child = el
+                .children()
+                .find(|c| c.is_element() && matches!(c.attribute("containerField"), Some(f) if f == face || f == long));
+            let Some(child) = child else {
+                self.scene.report.warn(format!("{}: no {long}", el.label()));
+                return Ok(None);
+            };
+            let Some(t) = self.texture(child)? else { return Ok(None) };
+            faces.push(t);
+        }
+        let Ok(faces) = <[TextureRef; 6]>::try_from(faces) else { return Ok(None) };
+        Ok(Some(CubeMap { faces }))
+    }
+
+    /// X3D 4.1 `EnvironmentLight`: the first one that is on lights the scene.
+    fn environment_light(&mut self, n: Node<'a, 'i>) -> Result<()> {
+        let field = |name: &str| n.children().find(|c| c.is_element() && c.attribute("containerField") == Some(name));
+        let diffuse = match field("diffuseTexture") {
+            Some(c) => self.cube_map(c)?,
+            None => None,
+        };
+        let specular = match field("specularTexture") {
+            Some(c) => self.cube_map(c)?,
+            None => None,
+        };
+        let env = Environment {
+            color: n.field_or("color", Vec3::ONE)?,
+            intensity: n.field_or("intensity", 1.0)?,
+            on: n.field_or("on", true)?,
+            rotation: n.field_or("rotation", glam::Quat::IDENTITY)?,
+            diffuse,
+            specular,
+        };
+        if n.attribute("diffuseCoefficients").is_some() {
+            self.scene.report.approximated("EnvironmentLight diffuseCoefficients (ignored; the cube maps are used)");
+        }
+        if env.diffuse.is_none() && env.specular.is_none() {
+            self.scene.report.unsupported("EnvironmentLight without a ComposedCubeMapTexture");
+        } else if self.scene.environment.is_none() && env.on {
+            self.scene.environment = Some(env);
+        }
+        Ok(())
     }
 
     /// TextureTransform (2D), TextureTransform3D or TextureTransformMatrix3D.
@@ -1345,4 +1415,14 @@ fn trs_of(n: Node<'_, '_>) -> Result<Trs> {
         scale_orientation: n.field_or("scaleOrientation", Quat::IDENTITY)?,
         center: n.field_or("center", Vec3::ZERO)?,
     })
+}
+
+/// The bytes of a `data:[mime];base64,…` url, or `None`.
+fn data_url_bytes(url: &str) -> Option<Vec<u8>> {
+    let rest = url.trim().strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    if !meta.ends_with(";base64") {
+        return None;
+    }
+    crate::fields::base64_decode(payload)
 }

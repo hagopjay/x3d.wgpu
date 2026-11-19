@@ -1,5 +1,5 @@
 {
- "about": "Expected pixels for x3d-view, each from a named measurement. Validity of each scene: validators/MANIFEST.json (x3d_mcp via the Loom witnesses).",
+ "about": "Expected pixels for x3d-view, each from a named measurement. Validity of each scene: validators/MANIFEST.json (x3d_mcp via the Loom witnesses). Each row is rendered twice: with the default sRGB encode (the verdict) and with --encode gamma22 (X_ITE's curve), to separate shading from encoding.",
  "sources": {
   "xite-furnace-colour": {
    "tool": "X_ITE 16.7.1 in Chromium 153.0.8010.12 (Playwright 1.63.0), WebGL on ANGLE/SwiftShader",
@@ -117,107 +117,439 @@
    "why_tolerance": "exact: a mirror with nothing to reflect",
    "source": "xite-furnace-colour",
    "source_row": "ctrl_noenv_m1_r0_c1"
-  }
- ],
- "not_run": [
+  },
+  {
+   "id": "ctrl_intensity05_m0_r1_c0.5",
+   "scene": "conformance/scenes/ctrl_intensity05_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    137,
+    137,
+    137
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity05_m0_r1_c0.5"
+  },
+  {
+   "id": "ctrl_intensity05_m1_r0.5_c1",
+   "scene": "conformance/scenes/ctrl_intensity05_m1_r0.5_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity05_m1_r0.5_c1"
+  },
+  {
+   "id": "ctrl_intensity05_m1_r0_c1",
+   "scene": "conformance/scenes/ctrl_intensity05_m1_r0_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity05_m1_r0_c1"
+  },
+  {
+   "id": "ctrl_intensity0_m0_r1_c0.5",
+   "scene": "conformance/scenes/ctrl_intensity0_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity0_m0_r1_c0.5"
+  },
+  {
+   "id": "ctrl_intensity0_m1_r0.5_c1",
+   "scene": "conformance/scenes/ctrl_intensity0_m1_r0.5_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity0_m1_r0.5_c1"
+  },
+  {
+   "id": "ctrl_intensity0_m1_r0_c1",
+   "scene": "conformance/scenes/ctrl_intensity0_m1_r0_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_intensity0_m1_r0_c1"
+  },
+  {
+   "id": "ctrl_noenv_m1_r0.5_c1",
+   "scene": "conformance/scenes/ctrl_noenv_m1_r0.5_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_noenv_m1_r0.5_c1"
+  },
+  {
+   "id": "furnace_m0_r0.5_c0.5",
+   "scene": "conformance/scenes/furnace_m0_r0.5_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    189,
+    189,
+    189
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r0.5_c0.5"
+  },
+  {
+   "id": "furnace_m0_r0_c0.5",
+   "scene": "conformance/scenes/furnace_m0_r0_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    189,
+    189,
+    189
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r0_c0.5"
+  },
   {
    "id": "furnace_m0_r1_c0.5",
+   "scene": "conformance/scenes/furnace_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     187,
     187,
     187
    ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m0_r1_c0.5",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
-  },
-  {
-   "id": "furnace_m0_r0.5_c0.5",
-   "expected": [
-    189,
-    189,
-    189
-   ],
-   "source": "xite-furnace-colour",
-   "source_row": "furnace_m0_r0.5_c0.5",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
-  },
-  {
-   "id": "furnace_m0_r0_c0.5",
-   "expected": [
-    189,
-    189,
-    189
-   ],
-   "source": "xite-furnace-colour",
-   "source_row": "furnace_m0_r0_c0.5",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m0_r1_c0.5"
   },
   {
    "id": "furnace_m0_r1_c1",
+   "scene": "conformance/scenes/furnace_m0_r1_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     255,
     255,
     255
    ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m0_r1_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
-  },
-  {
-   "id": "furnace_m1_r0_c1",
-   "expected": [
-    255,
-    255,
-    255
-   ],
-   "source": "xite-furnace-colour",
-   "source_row": "furnace_m1_r0_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m0_r1_c1"
   },
   {
    "id": "furnace_m1_r0.25_c1",
+   "scene": "conformance/scenes/furnace_m1_r0.25_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     255,
     255,
     255
    ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m1_r0.25_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m1_r0.25_c1"
   },
   {
    "id": "furnace_m1_r0.5_c1",
+   "scene": "conformance/scenes/furnace_m1_r0.5_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     255,
     255,
     255
    ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m1_r0.5_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m1_r0.5_c1"
   },
   {
    "id": "furnace_m1_r0.75_c1",
+   "scene": "conformance/scenes/furnace_m1_r0.75_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     255,
     255,
     255
    ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m1_r0.75_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m1_r0.75_c1"
+  },
+  {
+   "id": "furnace_m1_r0_c1",
+   "scene": "conformance/scenes/furnace_m1_r0_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r0_c1"
   },
   {
    "id": "furnace_m1_r1_c1",
+   "scene": "conformance/scenes/furnace_m1_r1_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
    "expected": [
     255,
     255,
     255
    ],
+   "max_delta": 1,
+   "why_tolerance": "exact (black, or clipped white)",
    "source": "xite-furnace-colour",
-   "source_row": "furnace_m1_r1_c1",
-   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+   "source_row": "furnace_m1_r1_c1"
+  },
+  {
+   "id": "half_m0_r0_c0.5",
+   "scene": "conformance/scenes/half_m0_r0_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    138,
+    138,
+    138
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m0_r0_c0.5"
+  },
+  {
+   "id": "half_m0_r1_c0.5",
+   "scene": "conformance/scenes/half_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    137,
+    137,
+    137
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m0_r1_c0.5"
+  },
+  {
+   "id": "half_m0_r1_c1",
+   "scene": "conformance/scenes/half_m0_r1_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m0_r1_c1"
+  },
+  {
+   "id": "half_m1_r0.25_c1",
+   "scene": "conformance/scenes/half_m1_r0.25_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m1_r0.25_c1"
+  },
+  {
+   "id": "half_m1_r0.5_c1",
+   "scene": "conformance/scenes/half_m1_r0.5_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m1_r0.5_c1"
+  },
+  {
+   "id": "half_m1_r0.75_c1",
+   "scene": "conformance/scenes/half_m1_r0.75_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m1_r0.75_c1"
+  },
+  {
+   "id": "half_m1_r0_c1",
+   "scene": "conformance/scenes/half_m1_r0_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m1_r0_c1"
+  },
+  {
+   "id": "half_m1_r1_c1",
+   "scene": "conformance/scenes/half_m1_r1_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "encode: X_ITE writes pow(x, 1/2.2), we write sRGB (Loom finding 1); the receipt's \u03b32.2 column renders with --encode gamma22",
+   "source": "xite-furnace-colour",
+   "source_row": "half_m1_r1_c1"
   }
- ]
+ ],
+ "not_run": []
 }
