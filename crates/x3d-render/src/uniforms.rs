@@ -14,6 +14,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use x3d_scene::{Light, LightKind, Material};
 
+/// Sun cascades (4) + spot/point shadow layers (16).
+pub const MAX_SHADOW_MATS: usize = 20;
+/// Shadow matrices before the local-light ones start.
+pub const SUN_CASCADES_MAX: usize = 4;
 pub const MAX_LIGHTS: usize = 16;
 
 #[repr(C)]
@@ -50,7 +54,8 @@ impl From<&Light> for GpuLight {
                 .extend(if l.on { l.ambient_intensity } else { 0.0 })
                 .into(),
             attenuation_radius: attenuation.extend(radius).into(),
-            spot: [beam, cut, 0.0, 0.0],
+            // z/w (shadow matrix, intensity) are filled in by the renderer.
+            spot: [beam, cut, -1.0, l.shadow_intensity],
         }
     }
 }
@@ -66,14 +71,19 @@ pub struct FrameUniform {
     pub near_far: [f32; 4],
     /// Target width and height in pixels, then the line/point size multiplier.
     pub viewport: [f32; 4],
-    /// World → the sun's shadow-map clip space.
-    pub shadow_proj: [[f32; 4]; 4],
-    /// x: index of the shadow-casting light (−1 = no shadows), y: depth bias,
-    /// z: 1 / shadow-map size, w: one shadow texel in world units.
+    /// x: sun light index (−1 = none), y: cascades, z: depth bias, w: sun shadowIntensity.
     pub shadow: [f32; 4],
+    /// View-space distance where each cascade ends.
+    pub cascade_far: [f32; 4],
+    /// One texel of each cascade in world units (scales the normal offset).
+    pub cascade_texel: [f32; 4],
+    /// x: 1 / sun map size, y: 1 / local map size.
+    pub shadow_maps: [f32; 4],
+    /// 0–3: sun cascades; 4–19: spot (1 each) and point (6 each) layers.
+    pub shadow_mats: [[[f32; 4]; 4]; MAX_SHADOW_MATS],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
-const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 64 + 16 + 80 * MAX_LIGHTS);
+const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 16 * 4 + 64 * MAX_SHADOW_MATS + 80 * MAX_LIGHTS);
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.
 #[repr(C)]

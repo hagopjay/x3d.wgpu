@@ -2,6 +2,8 @@
 <!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 4.0//EN" "https://www.web3d.org/specifications/x3d-4.0.dtd">
 <X3D profile='Interchange' version='4.0'>
   <head>
+    <component name='Lighting' level='2'/>
+    <component name='Shape' level='2'/>
     <meta name='title' content='Still life'/>
     <meta name='description' content='Three kinds of light, specular highlights, PhysicalMaterial, a transparent glass.'/>
     <meta name='generator' content='x3d.wgpu sample scenes'/>

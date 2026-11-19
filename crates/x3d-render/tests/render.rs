@@ -2,18 +2,28 @@
 //!
 //! They need *some* GPU adapter. On a machine without one (CI, containers),
 //! install a software Vulkan driver (`apt install mesa-vulkan-drivers`); if
-//! no adapter exists at all the GPU tests print a note and pass.
+//! no adapter exists at all the GPU tests print SKIPPED and pass, unless
+//! `X3D_REQUIRE_GPU=1` is set, which makes that a failure (CI sets it).
 
 use image::{Rgba, RgbaImage};
 use x3d_render::renderer::BUILTIN_SHADER;
 use x3d_render::uniforms::{DrawUniform, FrameUniform};
 use x3d_render::{ColorMode, Gpu, RenderSettings, Renderer, Shot, render_scene};
 
+/// The adapter for a GPU test. With `X3D_REQUIRE_GPU` set (CI does), no
+/// adapter is a *failure*, so the GPU tests can't pass by skipping.
 fn gpu() -> Option<Gpu> {
+    static NAMED: std::sync::Once = std::sync::Once::new();
     match Gpu::headless(x3d_render::Backend::Auto) {
-        Ok(g) => Some(g),
+        Ok(g) => {
+            NAMED.call_once(|| eprintln!("GPU tests on: {}", g.describe()));
+            Some(g)
+        }
+        Err(e) if std::env::var_os("X3D_REQUIRE_GPU").is_some() => {
+            panic!("X3D_REQUIRE_GPU is set but there is no adapter: {e}")
+        }
         Err(e) => {
-            eprintln!("skipping GPU test: {e}");
+            eprintln!("SKIPPED GPU test (no adapter): {e}");
             None
         }
     }
@@ -371,4 +381,229 @@ fn the_sun_casts_a_shadow_when_asked() {
     assert_eq!(open(&plain), open(&shadowed), "shadows leave open floor alone");
     assert_eq!(shade(&plain), open(&plain), "without shadows the whole floor is lit");
     assert!(shade(&shadowed) < 30, "the slab's shadow: {}", shade(&shadowed));
+}
+
+/// A floor, a slab over it, a camera straight down; `light` is spliced in.
+fn shadow_stage(light: &str) -> x3d_scene::Scene {
+    scene(&format!(
+        "<NavigationInfo headlight='false'/>
+         <Viewpoint position='0 6 0' orientation='1 0 0 -1.5708'/>
+         {light}
+         <Shape><Appearance><Material diffuseColor='1 1 1'/></Appearance>
+           <IndexedFaceSet coordIndex='0 1 2 3 -1' solid='false'>
+             <Coordinate point='-3 0 -3, -3 0 3, 3 0 3, 3 0 -3'/></IndexedFaceSet></Shape>
+         <Transform translation='0 1 0'><Shape><Appearance><Material diffuseColor='1 1 1'/></Appearance>
+           <Box size='1 0.2 1'/></Shape></Transform>"
+    ))
+}
+
+fn shadow_shot(s: &x3d_scene::Scene, gpu: &Gpu, shadows: bool) -> RgbaImage {
+    let settings = RenderSettings { shadows, ..Default::default() };
+    render_scene(gpu, s, &Shot { size: (64, 64), msaa: 1, settings, viewpoint: Some(1) }).unwrap()
+}
+
+#[test]
+fn a_spot_light_with_shadows_true_casts_a_perspective_shadow() {
+    let Some(gpu) = gpu() else { return };
+    // Spot at (1.5, 3, 0) aimed at the floor's centre-left: the slab's
+    // shadow lands at x ≈ −1.5 (half a unit wide).
+    let s = shadow_stage(
+        "<SpotLight location='1.5 3 0' direction='-0.5 -1 0' cutOffAngle='1.2' beamWidth='1.2' shadows='true' radius='20'/>",
+    );
+    let (plain, shadowed) = (shadow_shot(&s, &gpu, false), shadow_shot(&s, &gpu, true));
+    let at = |img: &RgbaImage, x: u32| img.get_pixel(x, 32).0[0];
+    // x = −1.5 → pixel 32 − 1.5·12.9 ≈ 13. x = +2.5 (open floor) → 64-ish edge, use 56.
+    assert!(at(&plain, 13) > 60, "lit without shadows: {}", at(&plain, 13));
+    assert!(at(&shadowed, 13) < at(&plain, 13) / 4, "shadowed: {} vs {}", at(&shadowed, 13), at(&plain, 13));
+    assert_eq!(at(&plain, 56), at(&shadowed, 56), "open floor unchanged");
+}
+
+#[test]
+fn a_point_light_casts_into_its_cube_faces() {
+    let Some(gpu) = gpu() else { return };
+    // Point light right above the slab: the shadow is straight below (−Y face)
+    // and is wider than the slab (perspective).
+    let s = shadow_stage("<PointLight location='0 2 0' shadows='true' radius='20'/>");
+    let (plain, shadowed) = (shadow_shot(&s, &gpu, false), shadow_shot(&s, &gpu, true));
+    // Seen from above the slab hides x∈[−0.5,0.5]; its shadow spans ±1 on the
+    // floor (similar triangles: 0.5·2/1). Sample x = 0.75 → pixel ≈ 42.
+    let at = |img: &RgbaImage, x: u32| img.get_pixel(x, 32).0[0];
+    assert!(at(&plain, 42) > 60, "lit: {}", at(&plain, 42));
+    assert!(at(&shadowed, 42) < at(&plain, 42) / 4, "in the cone of shadow: {}", at(&shadowed, 42));
+    assert_eq!(at(&plain, 60), at(&shadowed, 60), "beyond the shadow: unchanged");
+}
+
+#[test]
+fn shadow_intensity_scales_the_darkening() {
+    let Some(gpu) = gpu() else { return };
+    let light = |k: &str| {
+        format!("<DirectionalLight direction='1 -1 0' ambientIntensity='0' shadows='true' shadowIntensity='{k}'/>")
+    };
+    let full = shadow_shot(&shadow_stage(&light("1")), &gpu, true).get_pixel(45, 32).0[0];
+    let half = shadow_shot(&shadow_stage(&light("0.5")), &gpu, true).get_pixel(45, 32).0[0];
+    let open = shadow_shot(&shadow_stage(&light("1")), &gpu, true).get_pixel(12, 32).0[0];
+    assert!(full < 30, "full shadow: {full}");
+    // X3D: lit = mix(1, shadow, intensity) → about half the open floor's light.
+    let expected = (f32::from(open) + f32::from(full)) / 2.0;
+    assert!((f32::from(half) - expected).abs() < 12.0, "half: {half}, expected ≈ {expected}");
+}
+
+#[test]
+fn gpu_culling_draws_the_same_picture_and_skips_what_is_behind() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.budget.gpu_cull {
+        eprintln!("SKIPPED: budget has no GPU culling on {}", gpu.describe());
+        return;
+    }
+    // One box in view, one behind the camera.
+    let s = scene(
+        "<Shape><Appearance><Material diffuseColor='1 0 0'/></Appearance><Box/></Shape>
+         <Transform translation='0 0 20'><Shape><Appearance><Material diffuseColor='0 1 0'/></Appearance><Box/></Shape></Transform>",
+    );
+    let shot = |cull| Shot {
+        size: (64, 64),
+        msaa: 1,
+        settings: RenderSettings { cull, ..Default::default() },
+        viewpoint: None,
+    };
+    let cpu = render_scene(&gpu, &s, &shot(x3d_render::cull::Cull::Cpu)).unwrap();
+    let gpu_img = render_scene(&gpu, &s, &shot(x3d_render::cull::Cull::Gpu)).unwrap();
+    assert_eq!(cpu, gpu_img, "same pixels either way");
+
+    let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 1);
+    r.set_scene(&s);
+    let target = x3d_render::headless::Offscreen::new(&gpu.device, (64, 64), r.color_format());
+    let cam = x3d_render::headless::camera_for(&s, None);
+    let st = r.render(&target.view, (64, 64), &cam, &shot(x3d_render::cull::Cull::Cpu).settings);
+    assert_eq!((st.draw_calls, st.culled), (1, 1), "CPU: one drawn, one culled");
+    let st = r.render(&target.view, (64, 64), &cam, &shot(x3d_render::cull::Cull::Gpu).settings);
+    assert_eq!(st.draw_calls, 2, "GPU: both issued (indirect)…");
+    assert_eq!(r.gpu_visible(), Some(1), "…and the cull pass kept one");
+}
+
+#[test]
+fn timestamps_time_each_pass_that_ran() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.budget.timestamps {
+        eprintln!("SKIPPED: no TIMESTAMP_QUERY on {}", gpu.describe());
+        return;
+    }
+    let s = scene("<Shape><Appearance><Material/></Appearance><Box/></Shape><DirectionalLight/>");
+    let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 1);
+    r.set_scene(&s);
+    let target = x3d_render::headless::Offscreen::new(&gpu.device, (64, 64), r.color_format());
+    let cam = x3d_render::headless::camera_for(&s, None);
+    let settings = RenderSettings { shadows: true, ..Default::default() };
+    r.render(&target.view, (64, 64), &cam, &settings);
+    let t = r.wait_gpu_times().expect("a readback");
+    use x3d_render::timing::{BLOOM, SCENE, SHADOW};
+    assert!(t[SCENE].is_some_and(|ms| ms > 0.0), "{t:?}");
+    assert!(t[SHADOW].is_some_and(|ms| ms > 0.0), "{t:?}");
+    assert_eq!(t[BLOOM], None, "bloom didn't run, so it is null, not 0");
+}
+
+#[test]
+fn a_weak_gpu_profile_degrades_instead_of_failing() {
+    let Ok(weak) = Gpu::headless_with(x3d_render::Backend::Auto, x3d_render::Profile::Weak) else { return };
+    assert!(!weak.budget.hdr && !weak.budget.gpu_cull && !weak.budget.timestamps, "{}", weak.budget);
+    let s = shadow_stage("<DirectionalLight direction='1 -1 0' ambientIntensity='0'/>");
+    let everything = RenderSettings {
+        shadows: true,
+        tone_map: x3d_render::ToneMap::Aces,
+        bloom: 0.3,
+        cull: x3d_render::cull::Cull::Gpu,
+        ..Default::default()
+    };
+    let ldr = RenderSettings { shadows: true, ..Default::default() };
+    let shot = |settings| Shot { size: (64, 64), msaa: 4, settings, viewpoint: Some(1) };
+    let a = render_scene(&weak, &s, &shot(everything)).unwrap();
+    let b = render_scene(&weak, &s, &shot(ldr)).unwrap();
+    assert_eq!(a, b, "HDR and GPU culling fall back; shadows still work with one cascade");
+    assert!(a.get_pixel(45, 32).0[0] < 30, "shadow present on the weak profile");
+}
+
+#[test]
+fn a_lost_device_is_noticed_not_crashed() {
+    let Some(gpu) = gpu() else { return };
+    assert!(!gpu.is_lost());
+    gpu.device.destroy();
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    assert!(gpu.is_lost(), "the device-lost callback set the flag");
+}
+
+#[test]
+fn hostile_scenes_render_without_panics_or_validation_errors() {
+    let Some(gpu) = gpu() else { return };
+    // Each must either fail to load with an Err, or render cleanly.
+    let cases = [
+        (
+            "NaN coordinates",
+            "<Shape><IndexedFaceSet coordIndex='0 1 2'><Coordinate point='nan 0 0, 1 inf 0, 0 1 -inf'/></IndexedFaceSet></Shape>",
+        ),
+        (
+            "indices out of range",
+            "<Shape><IndexedFaceSet coordIndex='0 1 99 -1 5 6 7'><Coordinate point='0 0 0, 1 0 0, 0 1 0'/></IndexedFaceSet></Shape>",
+        ),
+        (
+            "empty geometry",
+            "<Shape><IndexedFaceSet/></Shape><Shape><PointSet/></Shape><Shape><IndexedLineSet coordIndex=''/></Shape>",
+        ),
+        ("huge numbers", "<Transform scale='1e38 1e38 1e38'><Shape><Box size='1e30 1e30 1e30'/></Shape></Transform>"),
+        (
+            "zero scale",
+            "<Transform scale='0 0 0'><Shape><Sphere/></Shape></Transform><DirectionalLight direction='0 0 0' shadows='true'/>",
+        ),
+        (
+            "degenerate lights",
+            "<SpotLight cutOffAngle='0' shadows='true'/><PointLight radius='-5' shadows='true'/><Shape><Box/></Shape>",
+        ),
+        ("20 point lights asking for shadows", &"<PointLight shadows='true'/>".repeat(20)),
+        (
+            "bad shader",
+            "<Shape><Appearance><ComposedShader language='GLSL'><ShaderPart type='VERTEX'>void main( {</ShaderPart><ShaderPart type='FRAGMENT'>nonsense</ShaderPart></ComposedShader></Appearance><Box/></Shape>",
+        ),
+        (
+            "route loop",
+            "<TimeSensor DEF='T' loop='true'/><ScalarInterpolator DEF='S' key='0 1' keyValue='0 1'/><ROUTE fromNode='T' fromField='fraction_changed' toNode='S' toField='set_fraction'/><ROUTE fromNode='S' fromField='value_changed' toNode='T' toField='set_startTime'/>",
+        ),
+    ];
+    for (name, body) in cases {
+        let Ok(mut s) = x3d_scene::parse_str(&format!("<X3D><Scene>{body}</Scene></X3D>")) else { continue };
+        s.advance(0.0);
+        s.advance(2.5);
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let settings =
+            RenderSettings { shadows: true, tone_map: x3d_render::ToneMap::Aces, bloom: 0.2, ..Default::default() };
+        let r = render_scene(&gpu, &s, &Shot { size: (32, 32), msaa: 4, settings, viewpoint: None });
+        let err = pollster::block_on(scope.pop());
+        assert!(r.is_ok(), "{name}: {r:?}");
+        assert!(err.is_none(), "{name}: wgpu validation error {err:?}");
+    }
+}
+
+#[test]
+fn an_uncaptured_validation_error_is_logged_not_fatal() {
+    let Some(gpu) = gpu() else { return };
+    // A copy past the end of a buffer is a validation error. wgpu's default
+    // handler would panic; ours logs (Gpu::new installs it).
+    let a = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    enc.copy_buffer_to_buffer(&a, 0, &b, 0, 64);
+    gpu.queue.submit([enc.finish()]);
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    // Still alive and usable:
+    let s = scene("<Shape><Appearance><UnlitMaterial emissiveColor='0 1 0'/></Appearance><Box size='3 3 3'/></Shape>");
+    let img = render_scene(&gpu, &s, &shot(RenderSettings::default())).unwrap();
+    assert!(close(center(&img), [0, 255, 0, 255], 1));
 }

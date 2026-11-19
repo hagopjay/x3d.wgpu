@@ -1155,6 +1155,8 @@ impl<'a, 'i> Loader<'a, 'i> {
             ambient_intensity,
             scope,
             on,
+            shadows: n.field_or("shadows", false)?,
+            shadow_intensity: n.field_or("shadowIntensity", 1.0f32)?.clamp(0.0, 1.0),
             node: self.node(),
         });
         self.used_as(n, id);

@@ -1,0 +1,7 @@
+# Per-adapter tolerance for tests/golden.rs. First matching row wins; the
+# adapter string is "<name> <driver> <driver_info>" from wgpu's AdapterInfo.
+#
+# adapter-substring  max_delta  max_bad_permille  why
+llvmpipe             2          0.5               goldens were blessed on lavapipe (see SOURCE.txt); only MSAA/LLVM rounding may move
+swiftshader          6          5                 another CPU rasteriser: different MSAA sample pattern
+*                    12         15                hardware GPUs: MSAA sample positions, anisotropic filtering and FMA rounding differ (Loom LEARNINGS-shader-vulkan finding 5: max 14/255 between two LLVM builds)

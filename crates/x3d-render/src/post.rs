@@ -12,6 +12,7 @@
 //! larger one. Small mips spread light far; large mips keep it tight.
 
 use crate::renderer::RenderSettings;
+use crate::timing::{self, GpuTimer};
 
 /// The format the scene renders into when post-processing is on.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -62,7 +63,13 @@ pub struct Post {
 }
 
 impl Post {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, output_format: wgpu::TextureFormat, samples: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output_format: wgpu::TextureFormat,
+        samples: u32,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/post.wgsl"));
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -122,7 +129,7 @@ impl Post {
                     targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                 }),
                 multiview_mask: None,
-                cache: None,
+                cache,
             })
         };
         let additive = wgpu::BlendState {
@@ -256,6 +263,7 @@ impl Post {
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         settings: &RenderSettings,
+        mut timer: Option<&mut GpuTimer>,
     ) {
         let s = self.sized.as_ref().expect("Post::ensure ran");
         let bloom = settings.bloom > 0.0;
@@ -265,7 +273,12 @@ impl Post {
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
 
-        let mut pass = |label, view: &wgpu::TextureView, pipeline, group, load| {
+        let mut pass = |label,
+                        view: &wgpu::TextureView,
+                        pipeline,
+                        group,
+                        load,
+                        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>| {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -275,7 +288,7 @@ impl Post {
                     ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -285,15 +298,24 @@ impl Post {
         };
         let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
         if bloom {
-            pass("bloom prefilter", &s.mips[0], &self.prefilter, &s.prefilter, clear);
+            let (first, last) = timer.as_deref_mut().map_or((None, None), |t| t.span(timing::BLOOM));
+            pass("bloom prefilter", &s.mips[0], &self.prefilter, &s.prefilter, clear, first);
             for (i, group) in s.down.iter().enumerate() {
-                pass("bloom down", &s.mips[i + 1], &self.down, group, clear);
+                pass("bloom down", &s.mips[i + 1], &self.down, group, clear, None);
             }
+            let n = s.up.len();
             for (i, group) in s.up.iter().enumerate().rev() {
-                pass("bloom up", &s.mips[i], &self.up, group, wgpu::LoadOp::Load);
+                // The last up-pass (i == 0) closes the bloom span.
+                let tw = if i == 0 { last.clone() } else { None };
+                pass("bloom up", &s.mips[i], &self.up, group, wgpu::LoadOp::Load, tw);
+            }
+            if n == 0 {
+                // A one-mip chain has no up-passes: close the span on an empty pass.
+                pass("bloom end", &s.mips[0], &self.up, &s.prefilter, wgpu::LoadOp::Load, last);
             }
         }
         let group = if bloom { &s.composite } else { &s.composite_no_bloom };
-        pass("tone map", target, &self.composite, group, clear);
+        let tw = timer.and_then(|t| t.pass(timing::TONE_MAP));
+        pass("tone map", target, &self.composite, group, clear, tw);
     }
 }

@@ -1,0 +1,16 @@
+#version 300 es
+precision highp float;
+uniform mat4 x3d_ProjectionMatrix;
+uniform mat4 x3d_ModelViewMatrix;
+uniform float time;
+in vec4 x3d_Vertex;
+in vec3 x3d_Normal;
+out vec3 n;
+void main() { n = x3d_Normal; gl_PointSize = 4.0 + time; gl_Position = x3d_ProjectionMatrix * x3d_ModelViewMatrix * x3d_Vertex; }
+ÿ#version 300 es
+precision highp float;
+uniform vec3 tint;
+in vec3 n;
+out vec4 fragColor;
+void main() { vec2 c = gl_PointCoord - 0.5; if (dot(c, c) > 0.25) discard; fragColor = vec4(tint * abs(n), 1.0); }
+

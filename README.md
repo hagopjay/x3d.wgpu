@@ -62,13 +62,16 @@ warnings:
 | `render FILE -o out.png [--sheet] [--time 8] [--viewpoint 2]` | Headless PNG. `--time` runs the animation to that second first. `--sheet` renders the debug views in a grid. |
 | `info FILE [--shapes]` | Loss report, bounds, viewpoints, routes, per-shape triangle counts. |
 | `shaders FILE [--show]` | Lists each ComposedShader and whether it compiles; `--show` prints the translated GLSL. |
-| `adapters [--backend vulkan]` | Lists the GPUs wgpu can see. |
+| `adapters [--backend vulkan] [--budget] [--profile weak]` | Lists the GPUs wgpu can see; `--budget` prints every setting this GPU gets and the limit or feature it came from. |
+| `bench FILE [--frames 60] [--cull cpu\|gpu\|off]` | N frames off-screen: GPU ms per pass (shadow, cull, scene, bloom, tone map) from timestamp queries (`null` where unsupported, never a CPU stand-in), CPU ms, culling counts, pipeline-cache effect. |
+| `conform [conformance] [--receipt r.json]` | Renders scenes whose expected pixels were measured in X_ITE (Loom record) and validated by x3d_mcp; writes a receipt where every number names its source. |
 
 Shared options: `--backend auto|vulkan|metal|dx12|gl`, `--size 1920x1080`, `--msaa 1|4`,
 `--view lit|normals|depth|base-color|lighting-only|facing|uv`, `--color-mode display|linear`,
 `--exposure 1.0`, `--wireframe`, `--headlight true|false`, `--no-cull`, `--segments 48`, `--strict`,
 `--load-all-inlines`, `--line-scale 1.0`, `--hide-lines`, `--hide-points`,
-`--tone-map off|aces|agx`, `--bloom 0.15`, `--bloom-threshold 0.8`, `--shadows`.
+`--tone-map off|aces|agx`, `--bloom 0.15`, `--bloom-threshold 0.8`, `--shadows`, `--cull off|cpu|gpu`,
+`--profile auto|weak` (`weak` emulates a WebGL2-class GPU: downlevel limits, no optional features).
 
 ### Viewer controls
 
@@ -147,8 +150,13 @@ All three are **off by default**, so pictures still match X_ITE.
   bright PBR and emissive scenes.
 - **Bloom** (`--bloom 0.15`, key **G**): light above `--bloom-threshold` is blurred through a
   mip chain (13-tap down, tent up) and added back. Sprites and emissive surfaces glow.
-- **Sun shadows** (`--shadows`, key **O**): a 2048² depth map from the first DirectionalLight
-  that is on, fitted to the scene's bounds, with 3×3 PCF. The still life shows them best.
+- **Shadows** (`--shadows`, key **O**): lights with X3D 4 `shadows='true'` cast (or, if none
+  asks, the first DirectionalLight), darkened by `shadowIntensity`. The sun gets up to 4
+  *cascades* fitted texel-stably to slices of the view (no shimmer as the camera moves); a
+  SpotLight gets one perspective map, a PointLight six (a cube). 3×3 PCF. Sizes and layer
+  counts come from the GPU budget.
+
+![Spot and point light shadows: off (left) and on (right)](docs/local-shadows.png)
 
 ## How it fits together
 
@@ -198,7 +206,9 @@ copes with sRGB swapchain formats, by handing them linear values.
 ## Testing
 
 ```sh
-cargo test --workspace          # 91 tests: unit, integration, property (proptest), doc, GPU pixel tests
+cargo test --workspace          # 109 tests: unit, integration, property, doc, GPU pixel, golden, conformance
+X3D_REQUIRE_GPU=1 cargo test --workspace   # what CI runs: no adapter is a failure, not a skip
+X3D_BLESS=1 cargo test -p x3d-render --test golden   # re-bless golden images on this adapter
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -210,6 +220,12 @@ ComposedShader paints its field's colour, and a ROUTE into that field repaints i
 display 0.5 to 154; bloom spills past an edge; a 45° sun puts a slab's shadow where it belongs.
 A test parses the WGSL with
 **naga** and checks the Rust uniform structs have exactly the shader's byte sizes.
+
+**Golden images** (`tests/golden/`) diff every sample scene against PNGs blessed on a named
+adapter, with a per-adapter tolerance table that says why each row exists. **Conformance**
+(`conformance/`) checks pixels against X_ITE measurements and refuses any scene changed since
+x3d_mcp validated it. **Fuzzing** (`fuzz/`, cargo-fuzz) hits the loader + animation runtime and
+the GLSL → naga path. Every number, with its source: [HARDENING.md](HARDENING.md).
 
 **No GPU?** Install a software Vulkan driver, and everything (window included,
 under Xvfb) works on the CPU:
@@ -226,7 +242,7 @@ cargo run -p x3d-render -- adapters --backend vulkan
 - Linux windowing needs the usual X11/Wayland libraries (`libxkbcommon-x11`, `libxcursor`, …).
 
 Crates: wgpu 30, naga 30 (GLSL in), winit 0.30, glam 0.34, roxmltree, bytemuck, clap, thiserror/anyhow, image (PNG, JPEG), proptest.
-All code is safe Rust (`unsafe_code = "forbid"`).
+Safe Rust (`unsafe_code = "deny"`), except one audited call in `pipeline_cache.rs`.
 
 ## Licence
 

@@ -1,0 +1,223 @@
+{
+ "about": "Expected pixels for x3d-view, each from a named measurement. Validity of each scene: validators/MANIFEST.json (x3d_mcp via the Loom witnesses).",
+ "sources": {
+  "xite-furnace-colour": {
+   "tool": "X_ITE 16.7.1 in Chromium 153.0.8010.12 (Playwright 1.63.0), WebGL on ANGLE/SwiftShader",
+   "record": "hagopjay/x3d.loom@9a73e445ce79fd4652d277892ba273383d29a0c1:runs/shader-vulkan-20261117/xite-furnace-colour.json",
+   "probe": "128\u00d7128 canvas, antialiased false, toneMapping NONE, centre 5\u00d75 mean",
+   "grade": "C (a named tool ran and the record holds its numbers)",
+   "short": "X_ITE 16.7.1/SwiftShader, x3d.loom@9a73e44 xite-furnace-colour.json"
+  }
+ },
+ "rows": [
+  {
+   "id": "exp2_a_unlit_default",
+   "scene": "conformance/scenes/exp2_a_unlit_default.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    128,
+    128,
+    128
+   ],
+   "max_delta": 1,
+   "why_tolerance": "8-bit rounding of display 0.5",
+   "source": "xite-furnace-colour",
+   "source_row": "exp2_a_unlit_default"
+  },
+  {
+   "id": "exp2_b_legacy_default",
+   "scene": "conformance/scenes/exp2_b_legacy_default.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    128,
+    128,
+    128
+   ],
+   "max_delta": 1,
+   "why_tolerance": "8-bit rounding of display 0.5",
+   "source": "xite-furnace-colour",
+   "source_row": "exp2_b_legacy_default"
+  },
+  {
+   "id": "exp2_c_physical_default",
+   "scene": "conformance/scenes/exp2_c_physical_default.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    186,
+    186,
+    186
+   ],
+   "max_delta": 2,
+   "why_tolerance": "X_ITE encodes linear\u2192display with pow(x, 1/2.2) (x_ite.js 16.7.1 l.67921), we with piecewise sRGB: linear 0.5 \u2192 186 vs 188 (Loom LEARNINGS-shader-vulkan finding 1)",
+   "source": "xite-furnace-colour",
+   "source_row": "exp2_c_physical_default"
+  },
+  {
+   "id": "ctrl_noenv_m0_r1_c0.5",
+   "scene": "conformance/scenes/ctrl_noenv_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact: no light reaches the sphere",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_noenv_m0_r1_c0.5"
+  },
+  {
+   "id": "ctrl_noenv_m0_r1_c0.5/background",
+   "scene": "conformance/scenes/ctrl_noenv_m0_r1_c0.5.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "corner",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact: Background skyColor 1 1 1",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_noenv_m0_r1_c0.5"
+  },
+  {
+   "id": "ctrl_noenv_m1_r0_c1",
+   "scene": "conformance/scenes/ctrl_noenv_m1_r0_c1.x3d",
+   "size": [
+    128,
+    128
+   ],
+   "probe": "centre5x5",
+   "expected": [
+    0,
+    0,
+    0
+   ],
+   "max_delta": 1,
+   "why_tolerance": "exact: a mirror with nothing to reflect",
+   "source": "xite-furnace-colour",
+   "source_row": "ctrl_noenv_m1_r0_c1"
+  }
+ ],
+ "not_run": [
+  {
+   "id": "furnace_m0_r1_c0.5",
+   "expected": [
+    187,
+    187,
+    187
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r1_c0.5",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m0_r0.5_c0.5",
+   "expected": [
+    189,
+    189,
+    189
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r0.5_c0.5",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m0_r0_c0.5",
+   "expected": [
+    189,
+    189,
+    189
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r0_c0.5",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m0_r1_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m0_r1_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m1_r0_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r0_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m1_r0.25_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r0.25_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m1_r0.5_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r0.5_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m1_r0.75_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r0.75_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  },
+  {
+   "id": "furnace_m1_r1_c1",
+   "expected": [
+    255,
+    255,
+    255
+   ],
+   "source": "xite-furnace-colour",
+   "source_row": "furnace_m1_r1_c1",
+   "reason": "needs EnvironmentLight (image-based lighting): not implemented, counted in the loss report (LEARNING.md quest G8b)"
+  }
+ ]
+}

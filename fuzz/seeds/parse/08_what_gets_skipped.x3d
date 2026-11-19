@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 4.0//EN" "https://www.web3d.org/specifications/x3d-4.0.dtd">
+<X3D profile='Interchange' version='4.0'>
+  <head>
+    <component name='Navigation' level='2'/>
+    <component name='Networking' level='2'/>
+    <component name='Text' level='1'/>
+    <meta name='title' content='The loss report'/>
+    <meta name='description' content='Nodes this renderer skips or approximates, so `x3d-view info` has something to say.'/>
+    <meta name='generator' content='x3d.wgpu sample scenes'/>
+  </head>
+  <Scene>
+
+    <Viewpoint position='0 0 6'/>
+    <TimeSensor DEF='Clock' cycleInterval='4' loop='true'/>
+    <OrientationInterpolator DEF='Spin' key='0 0.5 1' keyValue='0 1 0 0, 0 1 0 3.14, 0 1 0 6.28'/>
+    <Transform DEF='Spinner'>
+      <Shape>
+        <Appearance>
+          <ImageTexture url='"brick.png"'/>
+          <Material diffuseColor='0.8 0.4 0.3'/>
+        </Appearance>
+        <Box/>
+      </Shape>
+    </Transform>
+    <ROUTE fromNode='Clock' fromField='fraction_changed' toNode='Spin' toField='set_fraction'/>
+    <ROUTE fromNode='Spin' fromField='value_changed' toNode='Spinner' toField='set_rotation'/>
+    <Transform translation='0 -1.8 0'>
+      <Shape><Appearance><Material/></Appearance><Text string='"Hello"'/></Shape>
+    </Transform>
+    <Billboard axisOfRotation='0 1 0'>
+      <Transform translation='2 0 0'><Shape><Appearance><Material diffuseColor='0.2 0.6 0.9'/></Appearance><Sphere radius='0.5'/></Shape></Transform>
+    </Billboard>
+    <Inline url='"other_scene.x3d"'/>
+  </Scene>
+</X3D>

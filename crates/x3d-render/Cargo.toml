@@ -25,6 +25,9 @@ image = { workspace = true }
 winit = { workspace = true, optional = true }
 # wgpu's own shader compiler: X3D ComposedShaders arrive as GLSL.
 naga = { version = "30", features = ["glsl-in", "wgsl-in"] }
+# Conformance receipts: expected values in, receipt out, scene hashes checked.
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [features]
 # 🦀 `cargo build --no-default-features` gives a headless-only renderer

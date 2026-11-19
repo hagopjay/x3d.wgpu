@@ -18,18 +18,20 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use wgpu::util::DeviceExt;
 use x3d_scene::runtime::{Changes, Value};
-use x3d_scene::{
-    Aabb, Background, Draw, Light, LightKind, LodTag, Mesh, Scene, ShaderSource, SwitchGuard, Topology, Vertex,
-};
+use x3d_scene::{Aabb, Background, Draw, Light, LodTag, Mesh, Scene, ShaderSource, SwitchGuard, Topology, Vertex};
 
+use crate::budget::Budget;
 use crate::camera::OrbitCamera;
+use crate::cull::{self, Cull, GpuCull};
 use crate::custom::{self, Primitive, Program};
 use crate::gpu::Gpu;
 use crate::post::{HDR_FORMAT, Post};
+use crate::shadows::{self, ShadowMaps, ShadowPlan};
 use crate::textures::{MaterialTextures, TextureCache};
+use crate::timing::{self, GpuTimer, PassTimes};
 use crate::uniforms::{DrawUniform, FrameUniform, GpuLight, MAX_LIGHTS};
 
 /// The shader compiled into the binary. `--shader path.wgsl` overrides it.
@@ -129,8 +131,11 @@ pub struct RenderSettings {
     pub bloom: f32,
     /// Linear brightness where bloom starts (soft-kneed).
     pub bloom_threshold: f32,
-    /// Sun shadows: the first DirectionalLight casts a shadow map.
+    /// Shadows from lights with X3D `shadows='true'` (or, if none asks, the
+    /// first DirectionalLight): cascades for the sun, maps for spot/point.
     pub shadows: bool,
+    /// Frustum culling on the CPU, on the GPU (compute + indirect draws), or off.
+    pub cull: Cull,
 }
 
 impl RenderSettings {
@@ -156,6 +161,7 @@ impl Default for RenderSettings {
             bloom: 0.0,
             bloom_threshold: 0.8,
             shadows: false,
+            cull: Cull::Cpu,
         }
     }
 }
@@ -166,9 +172,15 @@ pub struct FrameStats {
     pub draw_calls: u32,
     pub pipeline_switches: u32,
     pub lights: u32,
-    /// CPU time to record and submit (not GPU time — that needs timestamp
-    /// queries; see LEARNING.md).
+    /// CPU time to record and submit.
     pub cpu_ms: f32,
+    /// Draws the CPU frustum test skipped (GPU culling: see `Renderer::gpu_visible`).
+    pub culled: u32,
+    /// Shadow depth passes rendered.
+    pub shadow_passes: u32,
+    /// GPU milliseconds per pass from timestamp queries (`timing::PASSES`),
+    /// for the newest frame whose readback finished; `None` if unsupported.
+    pub gpu: Option<PassTimes>,
 }
 
 /// Triangle meshes are vertex + index buffers. Lines and points are one
@@ -239,6 +251,10 @@ struct DrawItem {
     light_mask: u32,
     transparent: bool,
     center: Vec3,
+    /// Bounding-sphere radius (world), for frustum culling.
+    radius: f32,
+    /// Position in `Renderer::draws` (and in the GPU-culling buffers).
+    index: usize,
     /// World matrix (ComposedShaders need it every frame).
     model: glam::Mat4,
     /// A ComposedShader: (program, slot in its uniform buffer).
@@ -282,9 +298,18 @@ pub struct Renderer {
 
     frame_buffer: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
-    shadow: ShadowMap,
+    shadow: ShadowMaps,
     /// The scene's world bounds: what the sun's shadow map has to cover.
     bounds: Aabb,
+    /// What this GPU can afford (from `Gpu::budget`).
+    budget: Budget,
+    /// Compiled pipelines kept on disk between runs (if the GPU supports it).
+    cache: Option<(wgpu::PipelineCache, std::path::PathBuf)>,
+    timer: Option<GpuTimer>,
+    gpu_cull: Option<GpuCull>,
+    /// Did the last frame cull on the GPU? (`gpu_visible` is meaningless otherwise.)
+    culled_on_gpu: bool,
+    warned_budget: bool,
     draw_layout: wgpu::BindGroupLayout,
     draw_buffer: wgpu::Buffer,
     draw_bind_group: wgpu::BindGroup,
@@ -347,7 +372,7 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -356,6 +381,16 @@ impl Renderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -377,14 +412,15 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let shadow = ShadowMap::new(&device, &frame_buffer, &draw_layout);
+        let shadow = ShadowMaps::new(&device, &gpu.queue, &gpu.budget, &frame_buffer, &draw_layout);
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame bind group"),
             layout: &frame_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow.sun_array) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&shadow.local_array) },
             ],
         });
 
@@ -392,6 +428,14 @@ impl Renderer {
         let draw_stride = (size_of::<DrawUniform>() as u32).next_multiple_of(align);
         let (draw_buffer, draw_bind_group) = Self::draw_buffer(&device, &draw_layout, draw_stride, 1);
 
+        let budget = gpu.budget.clone();
+        let cache = if budget.pipeline_cache {
+            crate::pipeline_cache::open(&device, &gpu.adapter.get_info()).map(|(c, f, _)| (c, f))
+        } else {
+            None
+        };
+        let timer = budget.timestamps.then(|| GpuTimer::new(&device, &gpu.queue));
+        let gpu_cull = budget.gpu_cull.then(|| GpuCull::new(&device, cache.as_ref().map(|c| &c.0)));
         Self {
             queue: gpu.queue.clone(),
             color_format,
@@ -404,6 +448,12 @@ impl Renderer {
             frame_bind_group,
             shadow,
             bounds: Aabb::EMPTY,
+            budget,
+            cache,
+            timer,
+            gpu_cull,
+            culled_on_gpu: false,
+            warned_budget: false,
             draw_layout,
             draw_buffer,
             draw_bind_group,
@@ -547,6 +597,8 @@ impl Renderer {
                 light_mask,
                 transparent: false,
                 center: Vec3::ZERO,
+                radius: 0.0,
+                index: self.draws.len(),
                 model: draw.transform,
                 custom,
             });
@@ -554,6 +606,17 @@ impl Renderer {
         if (self.draw_stride as usize * self.draws.len().max(1)) as u64 > self.draw_buffer.size() {
             (self.draw_buffer, self.draw_bind_group) =
                 Self::draw_buffer(&self.device, &self.draw_layout, self.draw_stride, self.draws.len());
+        }
+        if let Some(gc) = &mut self.gpu_cull {
+            let counts: Vec<u32> = self
+                .draws
+                .iter()
+                .map(|d| match &self.meshes[d.mesh] {
+                    GpuMesh::Triangles { index_count, .. } => *index_count,
+                    GpuMesh::Wide { .. } => 0,
+                })
+                .collect();
+            gc.set_scene(&self.device, &counts);
         }
         self.write_draw_uniforms(scene);
         for (program, n) in self.programs.iter_mut().zip(&slots) {
@@ -608,10 +671,16 @@ impl Renderer {
             // X_ITE's rule: blended if the material is transparent, the base
             // texture has alpha, or the colours come from a ColorRGBA node.
             item.transparent = draw.material.is_transparent() || item.texture_alpha || draw.mesh.rgba_colors;
-            item.center = draw.world_bounds().center();
+            let bounds = draw.world_bounds();
+            item.center = bounds.center();
+            item.radius = if bounds.is_empty() { 0.0 } else { bounds.size().length() * 0.5 };
             item.model = draw.transform;
         }
         self.queue.write_buffer(&self.draw_buffer, 0, &bytes);
+        if let Some(spheres) = self.gpu_cull.as_ref().and_then(|g| g.spheres.as_ref()) {
+            let data: Vec<[f32; 4]> = self.draws.iter().map(|d| d.center.extend(d.radius).to_array()).collect();
+            self.queue.write_buffer(spheres, 0, bytemuck::cast_slice(&data));
+        }
     }
 
     /// Replace the shader. On any compile/validation error the old shader
@@ -705,7 +774,7 @@ impl Renderer {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: self.cache.as_ref().map(|c| &c.0),
         })
     }
 
@@ -743,11 +812,29 @@ impl Renderer {
         let started = Instant::now();
         let mut stats = FrameStats::default();
         self.ensure_targets(size);
-        let hdr = settings.hdr();
+        // The budget can veto what the settings ask for (a WebGL2-class GPU
+        // gets no float targets); say so once.
+        let hdr = settings.hdr() && self.budget.hdr;
+        let gpu_culling = settings.cull == Cull::Gpu && self.gpu_cull.is_some();
+        if ((settings.hdr() && !hdr) || (settings.cull == Cull::Gpu && !gpu_culling))
+            && !std::mem::replace(&mut self.warned_budget, true)
+        {
+            log::warn!(
+                "the GPU budget turns off: {}{}(see `x3d-view adapters --budget`)",
+                if settings.hdr() && !hdr { "HDR/tone map/bloom " } else { "" },
+                if settings.cull == Cull::Gpu && !gpu_culling { "GPU culling (using CPU culling) " } else { "" }
+            );
+        }
+        let cpu_culling = settings.cull == Cull::Cpu || (settings.cull == Cull::Gpu && !gpu_culling);
+        self.culled_on_gpu = gpu_culling;
+        if let Some(timer) = &mut self.timer {
+            timer.begin_frame();
+        }
         if hdr {
-            let post = self
-                .post
-                .get_or_insert_with(|| Post::new(&self.device, &self.queue, self.color_format, self.sample_count));
+            let post = self.post.get_or_insert_with(|| {
+                let cache = self.cache.as_ref().map(|c| &c.0);
+                Post::new(&self.device, &self.queue, self.color_format, self.sample_count, cache)
+            });
             post.ensure(&self.device, size);
         }
         // In HDR the scene writes display values unclipped and unencoded;
@@ -761,25 +848,26 @@ impl Renderer {
         let (near, far) = camera.near_far();
         let headlight = settings.headlight.unwrap_or(self.scene_headlight);
         // 🦀 Iterator chains: the headlight (if on) first, then scene lights.
-        let lights: Vec<GpuLight> = headlight
+        let scene_lights: Vec<Light> = headlight
             .then(|| Light::headlight(camera.forward()))
-            .iter()
-            .chain(&self.lights)
-            .map(GpuLight::from)
+            .into_iter()
+            .chain(self.lights.iter().cloned())
             .collect();
-        // The sun: the first DirectionalLight that is on (and fits in the array).
-        let sun = settings
-            .shadows
-            .then(|| {
-                self.lights.iter().enumerate().find_map(|(i, l)| match l.kind {
-                    LightKind::Directional { direction } if l.on => Some((i + usize::from(headlight), direction)),
-                    _ => None,
-                })
-            })
-            .flatten()
-            .filter(|(i, _)| *i < MAX_LIGHTS);
-        let shadow_proj = sun.map_or(Mat4::IDENTITY, |(_, d)| sun_projection(&self.bounds, d));
-        let shadow_texel = self.bounds.size().length() / SHADOW_SIZE as f32;
+        let plan = if settings.shadows {
+            shadows::plan(
+                &scene_lights[..scene_lights.len().min(MAX_LIGHTS)],
+                camera,
+                aspect,
+                &self.bounds,
+                &self.budget,
+            )
+        } else {
+            ShadowPlan::none()
+        };
+        let mut lights: Vec<GpuLight> = scene_lights.iter().map(GpuLight::from).collect();
+        for &(i, m) in &plan.local {
+            lights[i].spot[2] = m as f32;
+        }
         if lights.len() > MAX_LIGHTS && !std::mem::replace(&mut self.warned_lights, true) {
             log::warn!("{} lights; the shader takes {MAX_LIGHTS}, the rest are ignored", lights.len());
         }
@@ -800,8 +888,21 @@ impl Renderer {
                 camera.distance + camera.scene_radius,
             ],
             viewport: [size.0 as f32, size.1 as f32, settings.line_scale, 0.0],
-            shadow_proj: shadow_proj.to_cols_array_2d(),
-            shadow: [sun.map_or(-1.0, |(i, _)| i as f32), 0.0005, 1.0 / SHADOW_SIZE as f32, shadow_texel],
+            shadow: [
+                plan.sun.map_or(-1.0, |(i, _)| i as f32),
+                plan.cascades as f32,
+                0.0005,
+                plan.sun.map_or(1.0, |(_, s)| s),
+            ],
+            cascade_far: plan.cascade_far,
+            cascade_texel: plan.cascade_texel,
+            shadow_maps: [
+                1.0 / self.shadow.sun_size.max(1) as f32,
+                1.0 / self.shadow.local_size.max(1) as f32,
+                0.0,
+                0.0,
+            ],
+            shadow_mats: plan.mats.map(|m| m.to_cols_array_2d()),
             lights: [bytemuck::Zeroable::zeroed(); MAX_LIGHTS],
         };
         for (slot, light) in frame.lights.iter_mut().zip(&lights) {
@@ -824,7 +925,8 @@ impl Renderer {
                 hdr,
             }
         };
-        let visible = |d: &&DrawItem| {
+        let planes = cull::frustum_planes(camera.projection(aspect) * view);
+        let selected = |d: &&DrawItem| {
             let shown = match self.meshes[d.mesh].topology() {
                 Topology::Triangles => true,
                 Topology::Lines => settings.show_lines,
@@ -835,8 +937,35 @@ impl Renderer {
             let switched_on = self.guards[d.guard].iter().all(|g| self.switches[g.switch as usize] == g.child as i32);
             shown && switched_on && self.lods[d.lod].iter().all(|t| t.active(eye))
         };
-        let (mut transparent, opaque): (Vec<DrawItem>, Vec<DrawItem>) =
-            self.draws.iter().filter(visible).partition(|d| d.transparent);
+        let mut culled = 0;
+        let (mut transparent, opaque): (Vec<DrawItem>, Vec<DrawItem>) = self
+            .draws
+            .iter()
+            .filter(selected)
+            .filter(|d| {
+                // 🎨 CPU frustum culling: a bounding sphere entirely outside the view.
+                let keep = !cpu_culling || cull::sphere_visible(&planes, d.center, d.radius);
+                culled += u32::from(!keep);
+                keep
+            })
+            .partition(|d| d.transparent);
+        stats.culled = culled;
+        // Shadow casters ignore the camera's frustum: something behind you
+        // can still throw a shadow in front of you. One exception: geometry
+        // that *encloses* the camera and most of the scene (a sky bubble, a
+        // star dome) would put everything in its shadow, so it doesn't cast.
+        let scene_r = self.bounds.size().length() * 0.5;
+        let encloses = |d: &DrawItem| d.center.distance(eye) < d.radius && d.radius > 0.9 * scene_r;
+        let casters: Vec<(u32, usize)> = if plan.passes.is_empty() {
+            Vec::new()
+        } else {
+            self.draws
+                .iter()
+                .filter(selected)
+                .filter(|d| !d.transparent && !encloses(d))
+                .map(|d| (d.offset, d.mesh))
+                .collect()
+        };
         // Back to front: farthest first. `total_cmp` sorts floats without
         // panicking on NaN (f32 is only `PartialOrd`).
         transparent.sort_by(|a, b| b.center.distance_squared(eye).total_cmp(&a.center.distance_squared(eye)));
@@ -852,7 +981,17 @@ impl Renderer {
                     let samples = self.sample_count;
                     let device = &self.device;
                     if self.programs[p]
-                        .pipeline(device, primitive(key), key.blend, format, DEPTH_FORMAT, samples)
+                        .pipeline(
+                            device,
+                            primitive(key),
+                            key.blend,
+                            &custom::Target {
+                                format,
+                                depth: DEPTH_FORMAT,
+                                samples,
+                                cache: self.cache.as_ref().map(|c| &c.0),
+                            },
+                        )
                         .is_none()
                     {
                         broken.push(*key);
@@ -891,14 +1030,29 @@ impl Renderer {
         let targets = self.targets.as_ref().expect("ensure_targets ran");
         let clear = clear_color(&self.background, srgb_out);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
-        if sun.is_some() {
+        if !plan.passes.is_empty() {
             if self.shadow.pipeline.is_none() {
-                self.shadow.pipeline = Some(self.shadow.pipeline(&self.device, &self.shader));
+                let cache = self.cache.as_ref().map(|c| &c.0);
+                self.shadow.pipeline = Some(self.shadow.pipeline(&self.device, &self.shader, cache));
             }
-            let casters = ordered.iter().filter(|(_, k)| k.topology == Topology::Triangles && !k.blend);
-            let meshes = casters.map(|(item, _)| (item.offset, &self.meshes[item.mesh]));
-            self.shadow.record(&mut encoder, &self.draw_bind_group, meshes);
+            let casters: Vec<_> = casters
+                .iter()
+                .filter_map(|&(offset, mesh)| match &self.meshes[mesh] {
+                    GpuMesh::Triangles { vertices, indices, index_count, .. } => {
+                        Some((offset, vertices, indices, *index_count))
+                    }
+                    GpuMesh::Wide { .. } => None,
+                })
+                .collect();
+            let timing = self.timer.as_mut().map_or((None, None), |t| t.span(timing::SHADOW));
+            self.shadow.record(&mut encoder, &plan, &self.draw_bind_group, &casters, &timing);
+            stats.shadow_passes = plan.passes.len() as u32;
         }
+        if gpu_culling && let Some(gc) = &self.gpu_cull {
+            let timing = self.timer.as_mut().and_then(|t| t.compute(timing::CULL));
+            gc.record(&self.queue, &mut encoder, &planes, timing);
+        }
+        let indirect = if gpu_culling { self.gpu_cull.as_ref().and_then(|g| g.args.as_ref()) } else { None };
         {
             // With MSAA we draw into the multisampled texture and *resolve*
             // (average) it into the real target at the end of the pass.
@@ -923,7 +1077,7 @@ impl Renderer {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: self.timer.as_mut().and_then(|t| t.pass(timing::SCENE)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -942,8 +1096,15 @@ impl Renderer {
                     }
                     pass.set_bind_group(0, &program.bind_group, &[slot * program.stride]);
                     match &self.meshes[item.mesh] {
-                        GpuMesh::Triangles { vertices, indices, index_count, .. }
-                        | GpuMesh::Wide { vertices, indices, index_count, topology: Topology::Lines, .. } => {
+                        GpuMesh::Triangles { vertices, indices, index_count, .. } => {
+                            pass.set_vertex_buffer(0, vertices.slice(..));
+                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            match indirect {
+                                Some(args) => pass.draw_indexed_indirect(args, item.index as u64 * 20),
+                                None => pass.draw_indexed(0..*index_count, 0, 0..1),
+                            }
+                        }
+                        GpuMesh::Wide { vertices, indices, index_count, topology: Topology::Lines, .. } => {
                             pass.set_vertex_buffer(0, vertices.slice(..));
                             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                             pass.draw_indexed(0..*index_count, 0, 0..1);
@@ -970,7 +1131,11 @@ impl Renderer {
                     GpuMesh::Triangles { vertices, indices, index_count, .. } => {
                         pass.set_vertex_buffer(0, vertices.slice(..));
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..*index_count, 0, 0..1);
+                        // 🎨 GPU-driven: the cull pass decided this draw's instance count.
+                        match indirect {
+                            Some(args) => pass.draw_indexed_indirect(args, item.index as u64 * 20),
+                            None => pass.draw_indexed(0..*index_count, 0, 0..1),
+                        }
                     }
                     // 6 vertices (one quad) × one instance per segment.
                     GpuMesh::Wide { segments, count, .. } => {
@@ -983,13 +1148,49 @@ impl Renderer {
         } // 🦀 the pass borrows the encoder; it must end (drop) before `finish`
 
         if let Some(post) = self.post.as_ref().filter(|_| hdr) {
-            post.run(&self.queue, &mut encoder, target, settings);
+            post.run(&self.queue, &mut encoder, target, settings, self.timer.as_mut());
         }
 
         // --- 4. submit -----------------------------------------------------
+        if let Some(timer) = &self.timer {
+            timer.resolve(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+        if let Some(timer) = &mut self.timer {
+            timer.after_submit();
+            stats.gpu = timer.collect().or(timer.last);
+        }
         stats.cpu_ms = started.elapsed().as_secs_f32() * 1000.0;
         stats
+    }
+
+    /// Wait for the GPU and return this frame's pass times (bench, tests).
+    pub fn wait_gpu_times(&mut self) -> Option<PassTimes> {
+        let timer = self.timer.as_mut()?;
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        timer.collect()
+    }
+
+    /// Draws the GPU culling pass kept in the last frame (blocks).
+    pub fn gpu_visible(&self) -> Option<u32> {
+        self.gpu_cull.as_ref().filter(|_| self.culled_on_gpu).and_then(|g| g.visible_blocking(&self.device))
+    }
+
+    /// The budget this renderer runs under.
+    pub fn budget(&self) -> &Budget {
+        &self.budget
+    }
+
+    /// Save compiled pipelines for the next run. Returns (file, bytes).
+    pub fn save_pipeline_cache(&self) -> Option<(std::path::PathBuf, usize)> {
+        let (cache, file) = self.cache.as_ref()?;
+        match crate::pipeline_cache::save(cache, file) {
+            Ok(n) => Some((file.clone(), n)),
+            Err(e) => {
+                log::warn!("pipeline cache {}: {e}", file.display());
+                None
+            }
+        }
     }
 }
 
@@ -1073,147 +1274,6 @@ fn supported_samples(gpu: &Gpu, format: wgpu::TextureFormat, wanted: u32) -> u32
         n => {
             log::warn!("{n}× MSAA not supported for {format:?}; using 1×");
             1
-        }
-    }
-}
-
-// --- sun shadows -------------------------------------------------------------
-
-/// Shadow-map resolution (square). 2048² Depth32 = 16 MiB.
-pub const SHADOW_SIZE: u32 = 2048;
-
-/// The sun's view of the scene: an orthographic box (sunlight is parallel)
-/// around the scene's bounding sphere, looking along the light.
-fn sun_projection(bounds: &Aabb, direction: Vec3) -> Mat4 {
-    let center = bounds.center();
-    let r = (bounds.size().length() * 0.5).max(1e-3);
-    let d = direction.normalize_or(Vec3::NEG_Y);
-    let up = if d.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let view = glam::camera::rh::view::look_at_mat4(center - d * 2.0 * r, center, up);
-    glam::camera::rh::proj::directx::orthographic(-r, r, -r, r, 0.5 * r, 3.5 * r) * view
-}
-
-/// 🎨 The depth texture, its comparison sampler, and the depth-only
-/// pipeline that fills it.
-#[derive(Debug)]
-struct ShadowMap {
-    view: wgpu::TextureView,
-    sampler: wgpu::Sampler,
-    /// Group 0 for the shadow pass: the frame uniform *without* the map,
-    /// since a texture can't be read and written in the same pass.
-    frame_bind_group: wgpu::BindGroup,
-    layout: wgpu::PipelineLayout,
-    pipeline: Option<wgpu::RenderPipeline>,
-}
-
-impl ShadowMap {
-    fn new(device: &wgpu::Device, frame_buffer: &wgpu::Buffer, draw_layout: &wgpu::BindGroupLayout) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow map"),
-            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shadow frame layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        Self {
-            view: texture.create_view(&Default::default()),
-            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("shadow"),
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                compare: Some(wgpu::CompareFunction::LessEqual),
-                ..Default::default()
-            }),
-            frame_bind_group: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("shadow frame"),
-                layout: &frame_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() }],
-            }),
-            layout: device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("shadow"),
-                bind_group_layouts: &[Some(&frame_layout), Some(draw_layout)],
-                immediate_size: 0,
-            }),
-            pipeline: None,
-        }
-    }
-
-    fn pipeline(&self, device: &wgpu::Device, shader: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("shadow"),
-            layout: Some(&self.layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                // Same vertex buffers as the scene, but only the position is read.
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                })],
-            },
-            // No culling: thin single-sided X3D geometry should still cast.
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                // Slope-scaled bias: surfaces seen edge-on by the sun get more.
-                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
-            }),
-            multisample: Default::default(),
-            fragment: None,
-            multiview_mask: None,
-            cache: None,
-        })
-    }
-
-    /// Draw every caster's depth from the sun into the map.
-    fn record<'a>(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        draws: &wgpu::BindGroup,
-        casters: impl Iterator<Item = (u32, &'a GpuMesh)>,
-    ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shadow"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.view,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(self.pipeline.as_ref().expect("shadow pipeline built"));
-        pass.set_bind_group(0, &self.frame_bind_group, &[]);
-        for (offset, mesh) in casters {
-            if let GpuMesh::Triangles { vertices, indices, index_count, .. } = mesh {
-                pass.set_bind_group(1, draws, &[offset]);
-                pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*index_count, 0, 0..1);
-            }
         }
     }
 }

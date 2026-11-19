@@ -1,7 +1,20 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"   # weekly: the longer fuzz run
+
+env:
+  CARGO_TERM_COLOR: always
+  # A GPU test that finds no adapter FAILS instead of skipping.
+  X3D_REQUIRE_GPU: "1"
+  RUST_LOG: x3d_render=info,wgpu_core=warn
+
 jobs:
-  test:
+  # Software Vulkan (lavapipe) on a stock runner: every GPU test really runs.
+  lavapipe:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -9,12 +22,23 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # A software Vulkan driver (lavapipe), so the GPU tests run on a CPU-only runner.
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: Adapter and budget (every setting names its source)
+        run: cargo run -q --release -- adapters --budget --backend vulkan | tee budget.txt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Golden images and conformance (tables in the log)
+        run: cargo test -p x3d-render --test golden --test conformance -- --nocapture
       - run: cargo build -p x3d-render --no-default-features   # headless-only build
+      - name: Conformance receipt
+        run: cargo run -q --release -- conform conformance --backend vulkan --receipt receipt.json
+      - name: Frame-time table
+        run: |
+          for c in cpu gpu; do
+            cargo run -q --release -- bench scenes/05_still_life.x3d --frames 30 --size 640x360 \
+              --shadows --tone-map aces --bloom 0.15 --cull $c --backend vulkan
+          done | tee bench.txt
       - name: Render every sample scene
         run: |
           mkdir -p renders
@@ -22,6 +46,63 @@ jobs:
             cargo run -q --release -- render "$f" -o "renders/$(basename "$f" .x3d).png" --backend vulkan
           done
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: renders
-          path: renders/
+          name: lavapipe-evidence
+          path: |
+            budget.txt
+            receipt.json
+            bench.txt
+            renders/
+            target/golden/
+
+  # A real GPU, when a self-hosted runner labelled `gpu` exists and the
+  # repository variable X3D_GPU_RUNNER is "true". Goldens use the `*` row of
+  # crates/x3d-render/tests/golden/TOLERANCE unless a row names the adapter.
+  gpu:
+    if: vars.X3D_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run -q --release -- adapters --budget | tee budget.txt
+      - run: cargo test --workspace
+      - run: cargo test -p x3d-render --test golden --test conformance -- --nocapture
+      - run: cargo run -q --release -- conform conformance --receipt receipt.json
+      - run: cargo run -q --release -- bench scenes/05_still_life.x3d --frames 120 --shadows --tone-map aces --bloom 0.15 --cull gpu | tee bench.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gpu-evidence
+          path: |
+            budget.txt
+            receipt.json
+            bench.txt
+            target/golden/
+
+  # cargo-fuzz: the X3D loader + animation runtime, and the GLSL → naga path
+  # (shader text is untrusted). 60 s each on push, 15 min each weekly.
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_BOOTSTRAP: "1"   # cargo-fuzz's flags on the stable toolchain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          secs=60; [ "${{ github.event_name }}" = "schedule" ] && secs=900
+          mkdir -p corpus/parse corpus/glsl
+          cp seeds/parse/* corpus/parse/; cp seeds/glsl/* corpus/glsl/
+          cargo fuzz run -s none -O parse corpus/parse -- -max_total_time=$secs -max_len=8192 -dict=dict/x3d.dict
+          cargo fuzz run -s none -O glsl corpus/glsl -- -max_total_time=$secs -max_len=4096
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/

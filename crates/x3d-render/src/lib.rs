@@ -16,19 +16,28 @@
 //! order: [`gpu`] → [`uniforms`] → `shaders/scene.wgsl` → [`renderer`] →
 //! [`camera`] → [`headless`] → `viewer`.
 
+pub mod bench;
+pub mod budget;
 pub mod camera;
+pub mod conform;
+pub mod cull;
 pub mod custom;
+pub mod diff;
 pub mod glsl;
 pub mod gpu;
 pub mod headless;
+pub mod pipeline_cache;
 pub mod post;
 pub mod renderer;
+pub mod shadows;
 pub mod textures;
+pub mod timing;
 pub mod uniforms;
 // 🦀 Conditional compilation: this module only exists with the `window` feature.
 #[cfg(feature = "window")]
 pub mod viewer;
 
+pub use budget::{Budget, Profile};
 pub use camera::OrbitCamera;
 pub use gpu::{Backend, Gpu};
 pub use headless::{Shot, render_scene, render_sheet};

@@ -2,6 +2,9 @@
 <!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 4.0//EN" "https://www.web3d.org/specifications/x3d-4.0.dtd">
 <X3D profile='Interchange' version='4.0'>
   <head>
+    <component name='Navigation' level='2'/>
+    <component name='Networking' level='2'/>
+    <component name='Text' level='1'/>
     <meta name='title' content='The loss report'/>
     <meta name='description' content='Nodes this renderer skips or approximates, so `x3d-view info` has something to say.'/>
     <meta name='generator' content='x3d.wgpu sample scenes'/>
