@@ -1,0 +1,38 @@
+[package]
+name = "x3d-render"
+description = "A small wgpu (Vulkan/Metal/DX12) renderer for X3D scenes: windowed viewer and headless PNG renders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "x3d-view"
+path = "src/main.rs"
+
+[dependencies]
+x3d-scene = { workspace = true, features = ["bytemuck"] }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { workspace = true }
+image = { workspace = true }
+winit = { workspace = true, optional = true }
+
+[features]
+# 🦀 `cargo build --no-default-features` gives a headless-only renderer
+# (no windowing crates at all) — handy for CI and servers.
+default = ["window"]
+window = ["dep:winit"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# wgpu's own shader compiler, used by a test to check struct layouts.
+naga = { version = "30", features = ["wgsl-in"] }

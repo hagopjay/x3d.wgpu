@@ -1,0 +1,1276 @@
+//! Walking the X3D XML tree.
+//!
+//! 🦀 **Lifetimes, for real.** `roxmltree` parses without copying: every
+//! `Node<'a, 'input>` borrows from the `Document<'input>`, which borrows
+//! from the XML `&'input str`. Our [`Loader`] borrows them too, so the whole
+//! walk allocates nothing for names or attribute text. The compiler proves
+//! none of those borrows outlive the string.
+//!
+//! 🦀 **Extension traits.** We can't add methods to `roxmltree::Node`
+//! (it's someone else's type), but we *can* define our own trait
+//! ([`NodeExt`]) and implement it for their type.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use roxmltree::{Document, Node, NodeId};
+
+use crate::error::{Error, Result};
+use crate::fields::FieldValue;
+use crate::geometry::{self, IndexError, Parts, Polygons};
+use crate::scene::{
+    Background, Draw, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, TextureRef, Textures,
+    Topology, Viewpoint,
+};
+
+/// Knobs for loading.
+#[derive(Debug, Clone)]
+pub struct LoadOptions {
+    /// Segments around Sphere/Cylinder/Cone.
+    pub segments: u32,
+    /// `true`: a bad Shape fails the whole load. `false` (default): it is
+    /// skipped and listed in the report's warnings.
+    pub strict: bool,
+    /// Also load `Inline`s marked `load='false'` (a browser would load them
+    /// later, when a script or sensor asks; a still has no "later").
+    pub load_all_inlines: bool,
+}
+
+impl Default for LoadOptions {
+    fn default() -> Self {
+        Self {
+            segments: 48,
+            strict: false,
+            load_all_inlines: false,
+        }
+    }
+}
+
+/// Bookkeeping shared by one whole load, across every Inlined file.
+#[derive(Debug, Default)]
+struct InlineState {
+    /// Files being loaded right now, outermost first: a cycle detector.
+    stack: Vec<PathBuf>,
+    /// Each file is parsed once, however often it's Inlined.
+    /// 🦀 `Arc<Scene>`: shared, immutable, cheap to hand out again.
+    cache: HashMap<PathBuf, Arc<Scene>>,
+}
+
+const MAX_DEPTH: usize = 256;
+
+/// Load an `.x3d` (or gzipped `.x3dz`) file.
+pub fn load(path: impl AsRef<Path>) -> Result<Scene> {
+    load_with(path, &LoadOptions::default())
+}
+
+/// Load a file with options.
+pub fn load_with(path: impl AsRef<Path>, opts: &LoadOptions) -> Result<Scene> {
+    let path = path.as_ref();
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let mut state = InlineState {
+        stack: vec![path.clone()],
+        ..Default::default()
+    };
+    load_file(&path, opts, &mut state)
+}
+
+fn load_file(path: &Path, opts: &LoadOptions, state: &mut InlineState) -> Result<Scene> {
+    let bytes = std::fs::read(path).map_err(|source| Error::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let bytes = maybe_gunzip(bytes, path)?;
+    let text = String::from_utf8(bytes).map_err(|_| Error::NotUtf8(path.to_owned()))?;
+    parse_inner(&text, opts, path.parent(), state)
+}
+
+#[cfg(feature = "gzip")]
+fn maybe_gunzip(bytes: Vec<u8>, path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    if !bytes.starts_with(&[0x1f, 0x8b]) {
+        return Ok(bytes);
+    }
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes.as_slice())
+        .read_to_end(&mut out)
+        .map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(out)
+}
+
+#[cfg(not(feature = "gzip"))]
+fn maybe_gunzip(bytes: Vec<u8>, path: &Path) -> Result<Vec<u8>> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Err(Error::Invalid {
+            node: "file".into(),
+            line: 0,
+            message: format!(
+                "{} is gzipped; build with the `gzip` feature",
+                path.display()
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Parse X3D XML text.
+///
+/// ```
+/// let scene = x3d_scene::parse_str(r#"
+///   <X3D><Scene>
+///     <Shape><Box size='1 2 3'/></Shape>
+///   </Scene></X3D>"#).unwrap();
+/// assert_eq!(scene.draws.len(), 1);
+/// assert_eq!(scene.report.stats.triangles, 12);
+/// ```
+pub fn parse_str(xml: &str) -> Result<Scene> {
+    parse_str_with(xml, &LoadOptions::default())
+}
+
+/// Parse text that came from no file: `Inline` and texture urls can't be
+/// resolved (there is no folder to look in), and are reported as such.
+pub fn parse_str_with(xml: &str, opts: &LoadOptions) -> Result<Scene> {
+    parse_inner(xml, opts, None, &mut InlineState::default())
+}
+
+fn parse_inner(
+    xml: &str,
+    opts: &LoadOptions,
+    dir: Option<&Path>,
+    state: &mut InlineState,
+) -> Result<Scene> {
+    let head = xml.trim_start();
+    if head.starts_with("#X3D") || head.starts_with("#VRML") {
+        return Err(Error::Invalid {
+            node: "file".into(),
+            line: 1,
+            message: "this is the ClassicVRML encoding (.x3dv/.wrl); only the XML encoding is supported. \
+                      Convert it first (e.g. with castle-model-converter or X_ITE)."
+                .into(),
+        });
+    }
+    let doc = Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )?;
+    let scene_el = doc
+        .descendants()
+        .find(|n| n.has_tag_name("Scene"))
+        .ok_or(Error::NoScene)?;
+
+    let mut loader = Loader::new(&doc, opts, dir, state);
+    loader.children(scene_el, Mat4::IDENTITY, 0)?;
+    Ok(loader.finish())
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers on roxmltree nodes
+// ---------------------------------------------------------------------------
+
+/// 🦀 An extension trait: our methods on someone else's type.
+trait NodeExt {
+    fn name(&self) -> &str;
+    fn line(&self) -> u32;
+    /// `Ok(None)` if the attribute is absent, `Err` if it doesn't parse.
+    fn field<T: FieldValue>(&self, field: &str) -> Result<Option<T>>;
+    fn field_or<T: FieldValue>(&self, field: &str, default: T) -> Result<T> {
+        Ok(self.field(field)?.unwrap_or(default))
+    }
+    fn invalid(&self, message: impl Into<String>) -> Error;
+    fn label(&self) -> String;
+}
+
+impl NodeExt for Node<'_, '_> {
+    fn name(&self) -> &str {
+        self.tag_name().name()
+    }
+    fn line(&self) -> u32 {
+        self.document().text_pos_at(self.range().start).row
+    }
+    fn field<T: FieldValue>(&self, field: &str) -> Result<Option<T>> {
+        // 🦀 `Option::map` + `transpose` turns Option<Result<T>> into Result<Option<T>>.
+        self.attribute(field)
+            .map(|text| {
+                T::parse_field(text).map_err(|source| Error::Field {
+                    node: self.name().to_owned(),
+                    field: field.to_owned(),
+                    line: self.line(),
+                    source,
+                })
+            })
+            .transpose()
+    }
+    fn invalid(&self, message: impl Into<String>) -> Error {
+        Error::Invalid {
+            node: self.name().to_owned(),
+            line: self.line(),
+            message: message.into(),
+        }
+    }
+    fn label(&self) -> String {
+        match self.attribute("DEF") {
+            Some(def) => format!("{} \"{def}\"", self.name()),
+            None => format!("{} (line {})", self.name(), self.line()),
+        }
+    }
+}
+
+/// Child *elements* only (skips text, comments, and metadata nodes).
+fn elements<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
+    n.children()
+        .filter(|c| c.is_element() && !c.tag_name().name().starts_with("Metadata"))
+}
+
+/// Grouping nodes we treat as plain groups.
+const GROUPS: &[&str] = &[
+    "Group",
+    "StaticGroup",
+    "Collision",
+    "Anchor",
+    "CADAssembly",
+    "CADLayer",
+    "CADPart",
+    "CADFace",
+];
+
+/// Nodes that only matter for animation or interaction.
+fn is_behaviour(name: &str) -> bool {
+    const SUFFIXES: &[&str] = &[
+        "Sensor",
+        "Interpolator",
+        "Sequencer",
+        "Trigger",
+        "Filter",
+        "Chaser",
+        "Damper",
+    ];
+    matches!(
+        name,
+        "Script" | "ROUTE" | "TimeSensor" | "Sound" | "AudioClip"
+    ) || SUFFIXES.iter().any(|s| name.ends_with(s))
+}
+
+/// Texture nodes (but not TextureProperties / TextureTransform / TextureCoordinate).
+fn is_texture(name: &str) -> bool {
+    name.ends_with("Texture") || name.ends_with("Texture3D") || name == "ImageTextureAtlas"
+}
+
+/// Nodes that carry no picture at all.
+fn is_silent(name: &str) -> bool {
+    matches!(
+        name,
+        "WorldInfo"
+            | "ProtoDeclare"
+            | "ExternProtoDeclare"
+            | "IMPORT"
+            | "EXPORT"
+            | "IS"
+            | "connect"
+            | "field"
+            | "fieldValue"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The loader
+// ---------------------------------------------------------------------------
+
+/// 🦀 Two lifetimes: `'a` for borrows of the document, `'i` for the input
+/// text the document itself borrows. `'i: 'a` ("'i outlives 'a") is implied.
+/// The `&'a mut InlineState` is *lent* to us by the caller; an Inline lends
+/// it on again (a "reborrow") to the nested load, then gets it back.
+struct Loader<'a, 'i> {
+    defs: HashMap<&'a str, Node<'a, 'i>>,
+    opts: &'a LoadOptions,
+    /// The folder the scene came from: Inline and texture urls are relative to it.
+    dir: Option<&'a Path>,
+    inline: &'a mut InlineState,
+    scene: Scene,
+    /// Geometry node → its mesh, so `USE`d geometry is built once.
+    /// `None` = unsupported geometry (remembered so we report it once).
+    meshes: HashMap<NodeId, Option<Arc<Mesh>>>,
+    seen_navigation: bool,
+    seen_background: bool,
+    /// The LOD levels we are inside right now.
+    lod: Vec<LodTag>,
+    /// The light scopes we are inside right now.
+    scopes: Vec<u32>,
+}
+
+impl<'a, 'i> Loader<'a, 'i> {
+    fn new(
+        doc: &'a Document<'i>,
+        opts: &'a LoadOptions,
+        dir: Option<&'a Path>,
+        inline: &'a mut InlineState,
+    ) -> Self {
+        // Index every DEF in the document up front.
+        let defs = doc
+            .descendants()
+            .filter_map(|n| n.attribute("DEF").map(|d| (d, n)))
+            .collect();
+        let scene = Scene {
+            headlight: true,
+            ..Default::default()
+        };
+        Self {
+            defs,
+            opts,
+            dir,
+            inline,
+            scene,
+            meshes: HashMap::new(),
+            seen_navigation: false,
+            seen_background: false,
+            lod: Vec::new(),
+            scopes: Vec::new(),
+        }
+    }
+
+    /// Follow `USE='name'` to the node that `DEF`ined it.
+    fn resolve(&self, n: Node<'a, 'i>) -> Result<Node<'a, 'i>> {
+        match n.attribute("USE") {
+            None => Ok(n),
+            Some(name) => self
+                .defs
+                .get(name)
+                .copied()
+                .ok_or_else(|| Error::MissingDef(name.to_owned())),
+        }
+    }
+
+    /// The first child element (USE resolved) whose name is in `names`.
+    fn child(&self, n: Node<'a, 'i>, names: &[&str]) -> Result<Option<Node<'a, 'i>>> {
+        for c in elements(n) {
+            if names.contains(&c.name()) {
+                return self.resolve(c).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn children(&mut self, n: Node<'a, 'i>, world: Mat4, depth: usize) -> Result<()> {
+        // A group holding a scoped (global='false') light opens a scope:
+        // that light reaches only draws inside this group.
+        let scoped = elements(n).filter_map(|c| self.resolve(c).ok()).any(|c| {
+            let default_global = !c.has_tag_name("DirectionalLight");
+            matches!(c.name(), "DirectionalLight" | "PointLight" | "SpotLight")
+                && !c
+                    .field_or("global", default_global)
+                    .unwrap_or(default_global)
+        });
+        if scoped {
+            self.scopes.push(self.scene.light_scopes);
+            self.scene.light_scopes += 1;
+        }
+        let result = elements(n).try_for_each(|c| self.visit(c, world, depth + 1));
+        if scoped {
+            self.scopes.pop();
+        }
+        result
+    }
+
+    fn visit(&mut self, n: Node<'a, 'i>, world: Mat4, depth: usize) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(Error::TooDeep(MAX_DEPTH));
+        }
+        let n = self.resolve(n)?;
+        // X3D 4: grouping nodes and Shape have `visible`.
+        if !n.field_or("visible", true)? {
+            return Ok(());
+        }
+        let name = n.name();
+        match name {
+            "Transform" => {
+                let local = transform_matrix(n)?;
+                self.children(n, world * local, depth)
+            }
+            _ if GROUPS.contains(&name) => self.children(n, world, depth),
+            "Billboard" => {
+                self.scene
+                    .report
+                    .approximated("Billboard (drawn as a Group, not turned to face the camera)");
+                self.children(n, world, depth)
+            }
+            "LOD" => {
+                // Keep every level; the renderer picks one per frame from the
+                // camera's distance to `center`.
+                let group = self.scene.lod_groups;
+                self.scene.lod_groups += 1;
+                let center = world.transform_point3(n.field_or("center", Vec3::ZERO)?);
+                let range: Arc<[f32]> = n.field_or::<Vec<f32>>("range", Vec::new())?.into();
+                for (level, child) in elements(n).enumerate() {
+                    let tag = LodTag {
+                        group,
+                        level: level as u32,
+                        center,
+                        range: Arc::clone(&range),
+                    };
+                    self.lod.push(tag);
+                    let result = self.visit(child, world, depth + 1);
+                    self.lod.pop();
+                    result?;
+                }
+                Ok(())
+            }
+            "Switch" => {
+                // whichChoice = -1 shows nothing. (X3D 4 calls the field `children`, X3D 3 `choice`;
+                // in XML both are just child elements.)
+                let choice: i32 = n.field_or("whichChoice", -1)?;
+                match usize::try_from(choice)
+                    .ok()
+                    .and_then(|i| elements(n).nth(i))
+                {
+                    Some(chosen) => self.visit(chosen, world, depth + 1),
+                    None => Ok(()),
+                }
+            }
+            "Shape" => match self.shape(n, world) {
+                // 🦀 A match guard (`if …`) decides per error whether to recover.
+                Err(e) if !self.opts.strict => {
+                    self.scene.report.warn(format!("skipped a Shape: {e}"));
+                    Ok(())
+                }
+                other => other,
+            },
+            "DirectionalLight" | "PointLight" | "SpotLight" => self.light(n, world),
+            "Viewpoint" | "OrthoViewpoint" => self.viewpoint(n, world),
+            "NavigationInfo" => {
+                if !std::mem::replace(&mut self.seen_navigation, true) {
+                    self.scene.headlight = n.field_or("headlight", true)?;
+                }
+                Ok(())
+            }
+            "Background" => self.background(n),
+            "Inline" => self.inline(n, world),
+            _ if is_behaviour(name) => {
+                self.scene.report.ignored(name);
+                Ok(())
+            }
+            _ if is_silent(name) => Ok(()),
+            other => {
+                self.scene.report.unsupported(other);
+                Ok(())
+            }
+        }
+    }
+
+    // --- Shape -------------------------------------------------------------
+
+    fn shape(&mut self, n: Node<'a, 'i>, world: Mat4) -> Result<()> {
+        let mut appearance = None;
+        let mut geometry = None;
+        for c in elements(n) {
+            let c = self.resolve(c)?;
+            if c.has_tag_name("Appearance") {
+                appearance = Some(c);
+            } else if geometry.is_none() {
+                geometry = Some(c);
+            }
+        }
+        // A Shape with no geometry is legal and draws nothing.
+        let Some(g) = geometry else { return Ok(()) };
+        let Some(mesh) = self.mesh_for(g)? else {
+            return Ok(());
+        };
+        let material = self.material(appearance, &mesh)?;
+        self.scene.draws.push(Draw {
+            lod: self.lod.as_slice().into(),
+            scopes: self.scopes.as_slice().into(),
+            mesh,
+            transform: world,
+            material,
+        });
+        Ok(())
+    }
+
+    fn mesh_for(&mut self, g: Node<'a, 'i>) -> Result<Option<Arc<Mesh>>> {
+        if let Some(cached) = self.meshes.get(&g.id()) {
+            return Ok(cached.clone()); // cloning an Arc = bumping a counter
+        }
+        let built = self.build_geometry(g)?.map(Arc::new);
+        self.meshes.insert(g.id(), built.clone());
+        Ok(built)
+    }
+
+    fn build_geometry(&mut self, g: Node<'a, 'i>) -> Result<Option<Mesh>> {
+        let segments = self.opts.segments;
+        let parts = |side: bool, top: bool, bottom: bool| Parts { side, top, bottom };
+        let mut mesh = match g.name() {
+            "Box" => geometry::cuboid(g.field_or("size", Vec3::splat(2.0))?),
+            "Sphere" => geometry::sphere(g.field_or("radius", 1.0)?, segments),
+            "Cylinder" => geometry::cylinder(
+                g.field_or("radius", 1.0)?,
+                g.field_or("height", 2.0)?,
+                parts(
+                    g.field_or("side", true)?,
+                    g.field_or("top", true)?,
+                    g.field_or("bottom", true)?,
+                ),
+                segments,
+            ),
+            "Cone" => geometry::cone(
+                g.field_or("bottomRadius", 1.0)?,
+                g.field_or("height", 2.0)?,
+                parts(
+                    g.field_or("side", true)?,
+                    false,
+                    g.field_or("bottom", true)?,
+                ),
+                segments,
+            ),
+            "IndexedFaceSet" => self.indexed_face_set(g)?.tessellate(),
+            "TriangleSet"
+            | "IndexedTriangleSet"
+            | "TriangleFanSet"
+            | "IndexedTriangleFanSet"
+            | "TriangleStripSet"
+            | "IndexedTriangleStripSet"
+            | "QuadSet"
+            | "IndexedQuadSet" => self.triangle_family(g)?.tessellate(),
+            "ElevationGrid" => self.elevation_grid(g)?.tessellate(),
+            "IndexedLineSet" | "LineSet" => self.lines(g)?,
+            "PointSet" => {
+                let points = self.points(g)?;
+                let colors = self.colors(g)?;
+                geometry::point_set(&points, colors.as_deref())
+            }
+            other => {
+                self.scene.report.unsupported(other);
+                return Ok(None);
+            }
+        };
+        if mesh.topology == Topology::Triangles {
+            mesh.solid = g.field_or("solid", true)?;
+        }
+        mesh.label = g.label();
+        Ok(Some(mesh))
+    }
+
+    fn points(&self, g: Node<'a, 'i>) -> Result<Vec<Vec3>> {
+        match self.child(g, &["Coordinate", "CoordinateDouble"])? {
+            Some(c) => c.field_or("point", Vec::new()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Color (RGB) or ColorRGBA (RGBA) → RGBA.
+    fn colors(&self, g: Node<'a, 'i>) -> Result<Option<Vec<Vec4>>> {
+        Ok(match self.child(g, &["Color", "ColorRGBA"])? {
+            Some(c) if c.has_tag_name("Color") => {
+                let rgb: Vec<Vec3> = c.field_or("color", Vec::new())?;
+                Some(rgb.into_iter().map(|c| c.extend(1.0)).collect())
+            }
+            Some(c) => Some(c.field_or("color", Vec::new())?),
+            None => None,
+        })
+    }
+
+    /// Texture coordinates for each point: explicit ones, or positions for
+    /// `TextureCoordinateGenerator` (the texture matrix then projects them).
+    fn texcoords(&mut self, g: Node<'a, 'i>, points: &[Vec3]) -> Result<Option<Vec<Vec3>>> {
+        const KINDS: &[&str] = &[
+            "TextureCoordinate",
+            "TextureCoordinate3D",
+            "TextureCoordinateGenerator",
+            "MultiTextureCoordinate",
+        ];
+        let Some(mut tc) = self.child(g, KINDS)? else {
+            return Ok(None);
+        };
+        if tc.has_tag_name("MultiTextureCoordinate") {
+            if elements(tc).count() > 1 {
+                self.scene
+                    .report
+                    .approximated("MultiTextureCoordinate (first set only)");
+            }
+            match elements(tc).next() {
+                Some(first) => tc = self.resolve(first)?,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(match tc.name() {
+            "TextureCoordinate" => {
+                let st: Vec<Vec2> = tc.field_or("point", Vec::new())?;
+                st.into_iter().map(|p| p.extend(0.0)).collect()
+            }
+            "TextureCoordinate3D" => tc.field_or("point", Vec::new())?,
+            "TextureCoordinateGenerator" => {
+                let mode = tc.attribute("mode").unwrap_or("SPHERE");
+                if mode != "COORD" {
+                    self.scene.report.approximated(&format!(
+                        "TextureCoordinateGenerator mode='{mode}' (used as COORD)"
+                    ));
+                }
+                points.to_vec()
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    fn normals(&self, g: Node<'a, 'i>) -> Result<Vec<Vec3>> {
+        match self.child(g, &["Normal"])? {
+            Some(n) => n.field_or("vector", Vec::new()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Attach colours/normals and check indices; shared by every polygon geometry.
+    fn finish_polygons(
+        &mut self,
+        g: Node<'a, 'i>,
+        points: Vec<Vec3>,
+        faces: Vec<Vec<u32>>,
+        index: &Indices,
+        crease_angle: f32,
+    ) -> Result<Polygons> {
+        let at = |e: IndexError| g.invalid(e.to_string());
+        // 🦀 Destructuring a struct into local names in one `let`.
+        let Indices {
+            color: color_index,
+            normal: normal_index,
+            tex: tex_index,
+        } = *index;
+        let texcoords = match self.texcoords(g, &points)? {
+            Some(values) => {
+                geometry::bind(&values, true, tex_index, &faces, "texCoord").map_err(at)?
+            }
+            None => geometry::Binding::None,
+        };
+        let colors = self.colors(g)?.unwrap_or_default();
+        let normals = self.normals(g)?;
+        let colors = geometry::bind(
+            &colors,
+            g.field_or("colorPerVertex", true)?,
+            color_index,
+            &faces,
+            "color",
+        )
+        .map_err(at)?;
+        let normals = geometry::bind(
+            &normals,
+            g.field_or("normalPerVertex", true)?,
+            normal_index,
+            &faces,
+            "normal",
+        )
+        .map_err(at)?;
+        let polys = Polygons {
+            points,
+            faces,
+            colors,
+            normals,
+            texcoords,
+            ccw: g.field_or("ccw", true)?,
+            crease_angle,
+        };
+        polys.validate().map_err(at)?;
+        Ok(polys)
+    }
+
+    fn indexed_face_set(&mut self, g: Node<'a, 'i>) -> Result<Polygons> {
+        let coord_index: Vec<i32> = g.field_or("coordIndex", Vec::new())?;
+        let faces = to_faces(&coord_index);
+        if !g.field_or("convex", true)? && faces.iter().any(|f| f.len() > 3) {
+            self.scene.report.approximated(
+                "IndexedFaceSet convex='false' (fan-triangulated; see the ear-clipping quest)",
+            );
+        }
+        self.finish_polygons(
+            g,
+            self.points(g)?,
+            faces,
+            &Indices {
+                color: &g.field_or::<Vec<i32>>("colorIndex", Vec::new())?,
+                normal: &g.field_or::<Vec<i32>>("normalIndex", Vec::new())?,
+                tex: &g.field_or::<Vec<i32>>("texCoordIndex", Vec::new())?,
+            },
+            g.field_or("creaseAngle", 0.0)?,
+        )
+    }
+
+    /// All the TriangleSet/Fan/Strip/Quad variants become triangle (or quad) faces.
+    fn triangle_family(&mut self, g: Node<'a, 'i>) -> Result<Polygons> {
+        let points = self.points(g)?;
+        let name = g.name();
+        let indexed = name.starts_with("Indexed");
+        let index: Vec<u32> = if indexed {
+            let raw: Vec<i32> = g.field_or("index", Vec::new())?;
+            // Strip/fan sets keep their -1 separators; handled below.
+            raw.iter()
+                .map(|&i| if i < 0 { u32::MAX } else { i as u32 })
+                .collect()
+        } else {
+            (0..points.len() as u32).collect()
+        };
+        let runs = |counts: &[i32]| -> Vec<Vec<u32>> {
+            let mut out = Vec::new();
+            let mut start = 0usize;
+            for &c in counts {
+                let c = c.max(0) as usize;
+                out.push(index.get(start..start + c).unwrap_or(&[]).to_vec());
+                start += c;
+            }
+            out
+        };
+        let separated = || -> Vec<Vec<u32>> {
+            index
+                .split(|&i| i == u32::MAX)
+                .filter(|r| !r.is_empty())
+                .map(<[u32]>::to_vec)
+                .collect()
+        };
+        let faces: Vec<Vec<u32>> = match name {
+            "TriangleSet" | "IndexedTriangleSet" => {
+                index.chunks_exact(3).map(<[u32]>::to_vec).collect()
+            }
+            "QuadSet" | "IndexedQuadSet" => index.chunks_exact(4).map(<[u32]>::to_vec).collect(),
+            "TriangleFanSet" | "IndexedTriangleFanSet" => {
+                let fans = if indexed {
+                    separated()
+                } else {
+                    runs(&g.field_or("fanCount", Vec::new())?)
+                };
+                fans.iter()
+                    .flat_map(|f| {
+                        (1..f.len().saturating_sub(1)).map(move |k| vec![f[0], f[k], f[k + 1]])
+                    })
+                    .collect()
+            }
+            _ => {
+                let strips = if indexed {
+                    separated()
+                } else {
+                    runs(&g.field_or("stripCount", Vec::new())?)
+                };
+                strips
+                    .iter()
+                    .flat_map(|s| {
+                        (0..s.len().saturating_sub(2)).map(move |k| {
+                            // Every other strip triangle is wound the other way.
+                            if k % 2 == 0 {
+                                vec![s[k], s[k + 1], s[k + 2]]
+                            } else {
+                                vec![s[k + 1], s[k], s[k + 2]]
+                            }
+                        })
+                    })
+                    .collect()
+            }
+        };
+        self.finish_polygons(g, points, faces, &Indices::default(), 0.0)
+    }
+
+    fn elevation_grid(&mut self, g: Node<'a, 'i>) -> Result<Polygons> {
+        let nx = g.field_or::<i32>("xDimension", 0)?.max(0) as usize;
+        let nz = g.field_or::<i32>("zDimension", 0)?.max(0) as usize;
+        let (dx, dz): (f32, f32) = (g.field_or("xSpacing", 1.0)?, g.field_or("zSpacing", 1.0)?);
+        let mut heights: Vec<f32> = g.field_or("height", Vec::new())?;
+        if heights.len() < nx * nz {
+            self.scene.report.warn(format!(
+                "{}: {} heights for a {nx}×{nz} grid; the missing ones are 0",
+                g.label(),
+                heights.len()
+            ));
+            heights.resize(nx * nz, 0.0);
+        }
+        let points = (0..nz)
+            .flat_map(|j| (0..nx).map(move |i| (i, j)))
+            .map(|(i, j)| Vec3::new(i as f32 * dx, heights[i + j * nx], j as f32 * dz))
+            .collect();
+        let id = |i: usize, j: usize| (i + j * nx) as u32;
+        let faces = (0..nz.saturating_sub(1))
+            .flat_map(|j| (0..nx.saturating_sub(1)).map(move |i| (i, j)))
+            .map(|(i, j)| vec![id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)])
+            .collect();
+        self.finish_polygons(
+            g,
+            points,
+            faces,
+            &Indices::default(),
+            g.field_or("creaseAngle", 0.0)?,
+        )
+    }
+
+    fn lines(&mut self, g: Node<'a, 'i>) -> Result<Mesh> {
+        let points = self.points(g)?;
+        let lines: Vec<Vec<u32>> = if g.has_tag_name("IndexedLineSet") {
+            to_faces(&g.field_or("coordIndex", Vec::new())?)
+        } else {
+            let counts: Vec<i32> = g.field_or("vertexCount", Vec::new())?;
+            let mut start = 0u32;
+            counts
+                .iter()
+                .map(|&c| {
+                    let run = (start..start + c.max(0) as u32).collect();
+                    start += c.max(0) as u32;
+                    run
+                })
+                .collect()
+        };
+        let colors = self.colors(g)?.unwrap_or_default();
+        let color_index: Vec<i32> = g.field_or("colorIndex", Vec::new())?;
+        let colors = geometry::bind(
+            &colors,
+            g.field_or("colorPerVertex", true)?,
+            &color_index,
+            &lines,
+            "color",
+        )
+        .map_err(|e| g.invalid(e.to_string()))?;
+        if let Some(&bad) = lines
+            .iter()
+            .flatten()
+            .find(|&&c| c as usize >= points.len())
+        {
+            return Err(g.invalid(format!(
+                "coordinate index {bad} is out of range ({} points)",
+                points.len()
+            )));
+        }
+        Ok(geometry::polylines(&points, &lines, &colors))
+    }
+
+    // --- Appearance --------------------------------------------------------
+
+    fn material(&mut self, appearance: Option<Node<'a, 'i>>, mesh: &Mesh) -> Result<Material> {
+        let lines_or_points = mesh.topology != Topology::Triangles;
+        let Some(app) = appearance else {
+            return Ok(Material::UNLIT_WHITE);
+        };
+
+        for c in elements(app) {
+            match c.name() {
+                "ComposedShader" | "ProgramShader" | "PackagedShader" => {
+                    self.scene
+                        .report
+                        .unsupported(&format!("{} (custom shaders)", c.name()));
+                }
+                "LineProperties" | "PointProperties" => {
+                    self.scene
+                        .report
+                        .approximated(&format!("{} (lines and points are 1 px)", c.name()));
+                }
+                _ => {}
+            }
+        }
+
+        let m = self.child(
+            app,
+            &[
+                "Material",
+                "UnlitMaterial",
+                "PhysicalMaterial",
+                "TwoSidedMaterial",
+            ],
+        )?;
+        let mut out = match m {
+            None => Material::UNLIT_WHITE,
+            Some(m) => self.material_node(m)?,
+        };
+        if let Some(m) = m {
+            out.textures = self.material_textures(m)?;
+        }
+
+        // Appearance.texture: X3D's original texture slot. It *replaces* a
+        // classic Material's diffuse colour, and tints an unlit one.
+        for c in elements(app) {
+            let field = c.attribute("containerField").unwrap_or("texture");
+            if is_texture(c.name()) && field == "texture" && out.textures.base.is_none() {
+                let c = self.resolve(c)?;
+                out.textures.base = self.texture(c)?;
+                if out.textures.base.is_some() && m.is_some_and(|m| m.has_tag_name("Material")) {
+                    out.diffuse = Vec3::ONE;
+                }
+            }
+        }
+        out.texture_matrix = self.texture_matrix(app)?;
+
+        if lines_or_points {
+            // X3D: lines and points are unlit, drawn in emissiveColor.
+            out.unlit = true;
+        }
+        Ok(out)
+    }
+
+    fn material_node(&mut self, m: Node<'a, 'i>) -> Result<Material> {
+        let mut out = Material::default();
+        match m.name() {
+            "Material" | "TwoSidedMaterial" => {
+                if m.has_tag_name("TwoSidedMaterial") && m.field_or("separateBackColor", false)? {
+                    self.scene
+                        .report
+                        .approximated("TwoSidedMaterial back colours (front used on both sides)");
+                }
+                out.diffuse = m.field_or("diffuseColor", out.diffuse)?;
+                out.emissive = m.field_or("emissiveColor", out.emissive)?;
+                out.specular = m.field_or("specularColor", out.specular)?;
+                out.shininess = m.field_or("shininess", out.shininess)?;
+                out.ambient_intensity = m.field_or("ambientIntensity", out.ambient_intensity)?;
+                out.transparency = m.field_or("transparency", 0.0)?;
+            }
+            "UnlitMaterial" => {
+                out.emissive = m.field_or("emissiveColor", Vec3::ONE)?;
+                out.diffuse = out.emissive;
+                out.transparency = m.field_or("transparency", 0.0)?;
+                out.unlit = true;
+            }
+            _ => {
+                // PhysicalMaterial: glTF-style metallic-roughness. X3D's defaults
+                // are metallic = roughness = 1 (a rough metal).
+                out.diffuse = m.field_or("baseColor", Vec3::ONE)?;
+                out.emissive = m.field_or("emissiveColor", Vec3::ZERO)?;
+                out.transparency = m.field_or("transparency", 0.0)?;
+                out.pbr = Some(Pbr {
+                    metallic: m.field_or("metallic", 1.0)?,
+                    roughness: m.field_or("roughness", 1.0)?,
+                    occlusion_strength: m.field_or("occlusionStrength", 1.0)?,
+                    normal_scale: m.field_or("normalScale", 1.0)?,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// X3D 4 puts textures *inside* the material, each named by its
+    /// `containerField`. Note: we read `containerField` from the element as
+    /// written — a `USE` element carries its own.
+    fn material_textures(&mut self, m: Node<'a, 'i>) -> Result<Textures> {
+        let mut t = Textures::default();
+        let unlit = m.has_tag_name("UnlitMaterial");
+        for c in elements(m) {
+            if !is_texture(c.name()) {
+                continue;
+            }
+            let field = c.attribute("containerField").unwrap_or_default();
+            let slot = match field {
+                "baseTexture" | "diffuseTexture" => &mut t.base,
+                "emissiveTexture" if unlit => &mut t.base,
+                "emissiveTexture" => &mut t.emissive,
+                "normalTexture" => &mut t.normal,
+                "metallicRoughnessTexture" => &mut t.metallic_roughness,
+                "occlusionTexture" => &mut t.occlusion,
+                other => {
+                    self.scene
+                        .report
+                        .unsupported(&format!("{} {other}", m.name()));
+                    continue;
+                }
+            };
+            let resolved = self.resolve(c)?;
+            *slot = self.texture(resolved)?;
+        }
+        Ok(t)
+    }
+
+    /// An ImageTexture → a file on disk.
+    fn texture(&mut self, el: Node<'a, 'i>) -> Result<Option<TextureRef>> {
+        if !el.has_tag_name("ImageTexture") {
+            self.scene
+                .report
+                .unsupported(&format!("{} (only ImageTexture so far)", el.name()));
+            return Ok(None);
+        }
+        let Some(dir) = self.dir else {
+            self.scene
+                .report
+                .unsupported("ImageTexture (no folder: the scene was parsed from a string)");
+            return Ok(None);
+        };
+        let urls: Vec<String> = el.field_or("url", Vec::new())?;
+        let found = urls
+            .iter()
+            .filter(|u| !u.contains("://") && !u.starts_with("data:"))
+            .map(|u| dir.join(u))
+            .find(|p| p.is_file());
+        let Some(path) = found else {
+            self.scene
+                .report
+                .warn(format!("{}: no texture file among {urls:?}", el.label()));
+            return Ok(None);
+        };
+        Ok(Some(TextureRef {
+            path: path.canonicalize().unwrap_or(path),
+            repeat_s: el.field_or("repeatS", true)?,
+            repeat_t: el.field_or("repeatT", true)?,
+        }))
+    }
+
+    /// TextureTransform (2D), TextureTransform3D or TextureTransformMatrix3D.
+    fn texture_matrix(&mut self, app: Node<'a, 'i>) -> Result<Mat4> {
+        const KINDS: &[&str] = &[
+            "TextureTransform",
+            "TextureTransform3D",
+            "TextureTransformMatrix3D",
+            "MultiTextureTransform",
+        ];
+        let Some(mut t) = self.child(app, KINDS)? else {
+            return Ok(Mat4::IDENTITY);
+        };
+        if t.has_tag_name("MultiTextureTransform") {
+            match elements(t).next() {
+                Some(first) => t = self.resolve(first)?,
+                None => return Ok(Mat4::IDENTITY),
+            }
+        }
+        // X3D: Tc' = −C × S × R × C × T × Tc (read right to left: translate,
+        // move the centre to the origin, rotate, scale, move back).
+        let compose = |c: Vec3, s: Vec3, r: Quat, t: Vec3| {
+            Mat4::from_translation(-c)
+                * Mat4::from_scale(s)
+                * Mat4::from_quat(r)
+                * Mat4::from_translation(c)
+                * Mat4::from_translation(t)
+        };
+        Ok(match t.name() {
+            "TextureTransform" => {
+                let c: Vec2 = t.field_or("center", Vec2::ZERO)?;
+                let s: Vec2 = t.field_or("scale", Vec2::ONE)?;
+                let tr: Vec2 = t.field_or("translation", Vec2::ZERO)?;
+                let r = Quat::from_rotation_z(t.field_or("rotation", 0.0)?);
+                compose(c.extend(0.0), s.extend(1.0), r, tr.extend(0.0))
+            }
+            "TextureTransform3D" => compose(
+                t.field_or("center", Vec3::ZERO)?,
+                t.field_or("scale", Vec3::ONE)?,
+                t.field_or("rotation", Quat::IDENTITY)?,
+                t.field_or("translation", Vec3::ZERO)?,
+            ),
+            "TextureTransformMatrix3D" => {
+                let m: Vec<f32> = t.field_or("matrix", Mat4::IDENTITY.to_cols_array().to_vec())?;
+                match <[f32; 16]>::try_from(m) {
+                    // SFMatrix4f is column-major: the translation is in the last four.
+                    Ok(cols) => Mat4::from_cols_array(&cols),
+                    Err(m) => {
+                        return Err(t.invalid(format!("matrix has {} numbers, not 16", m.len())));
+                    }
+                }
+            }
+            _ => Mat4::IDENTITY,
+        })
+    }
+
+    // --- Inline ------------------------------------------------------------
+
+    /// Load another X3D file and place its contents here.
+    fn inline(&mut self, n: Node<'a, 'i>, world: Mat4) -> Result<()> {
+        if !n.field_or("load", true)? && !self.opts.load_all_inlines {
+            self.scene
+                .report
+                .ignored("Inline load='false' (--load-all-inlines loads it)");
+            return Ok(());
+        }
+        let Some(dir) = self.dir else {
+            self.scene
+                .report
+                .unsupported("Inline (no folder: the scene was parsed from a string)");
+            return Ok(());
+        };
+        let urls: Vec<String> = n.field_or("url", Vec::new())?;
+        let found = urls
+            .iter()
+            .filter(|u| !u.contains("://"))
+            .map(|u| dir.join(u))
+            .find(|p| p.is_file());
+        let Some(path) = found else {
+            self.scene
+                .report
+                .warn(format!("{}: no file among {urls:?}", n.label()));
+            return Ok(());
+        };
+        let path = path.canonicalize().unwrap_or(path);
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |f| f.to_string_lossy().into_owned(),
+        );
+        if self.inline.stack.contains(&path) {
+            self.scene
+                .report
+                .warn(format!("{name}: Inline cycle; not loaded again"));
+            return Ok(());
+        }
+        let child = match self.inline.cache.get(&path) {
+            Some(scene) => Arc::clone(scene),
+            None => {
+                self.inline.stack.push(path.clone());
+                // 🦀 `self.inline` is `&mut InlineState`; passing it on lends it to
+                // the nested load until that call returns.
+                let loaded = load_file(&path, self.opts, self.inline);
+                self.inline.stack.pop();
+                match loaded {
+                    Ok(scene) => {
+                        let scene = Arc::new(scene);
+                        self.inline.cache.insert(path, Arc::clone(&scene));
+                        scene
+                    }
+                    Err(e) if !self.opts.strict => {
+                        self.scene.report.warn(format!("{name}: {e}"));
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        let scopes = self.scopes.clone();
+        self.scene.splice(&child, world, &scopes, &name);
+        Ok(())
+    }
+
+    // --- Environment -------------------------------------------------------
+
+    fn light(&mut self, n: Node<'a, 'i>, world: Mat4) -> Result<()> {
+        if !n.field_or("on", true)? {
+            return Ok(());
+        }
+        let color = n.field_or("color", Vec3::ONE)?;
+        let intensity = n.field_or("intensity", 1.0)?;
+        let ambient_intensity = n.field_or("ambientIntensity", 0.0)?;
+        let (scale, _, _) = world.to_scale_rotation_translation();
+        let radius_scale = scale.max_element();
+        let dir = |v: Vec3| world.transform_vector3(v).normalize_or(Vec3::NEG_Z);
+        let kind = match n.name() {
+            "DirectionalLight" => LightKind::Directional {
+                direction: dir(n.field_or("direction", Vec3::NEG_Z)?),
+            },
+            "PointLight" => LightKind::Point {
+                location: world.transform_point3(n.field_or("location", Vec3::ZERO)?),
+                attenuation: n.field_or("attenuation", Vec3::X)?,
+                radius: n.field_or("radius", 100.0)? * radius_scale,
+            },
+            _ => LightKind::Spot {
+                location: world.transform_point3(n.field_or("location", Vec3::ZERO)?),
+                direction: dir(n.field_or("direction", Vec3::NEG_Z)?),
+                attenuation: n.field_or("attenuation", Vec3::X)?,
+                radius: n.field_or("radius", 100.0)? * radius_scale,
+                beam_width: n.field_or("beamWidth", std::f32::consts::FRAC_PI_4)?,
+                cut_off_angle: n.field_or("cutOffAngle", std::f32::consts::FRAC_PI_2)?,
+            },
+        };
+        // X3D: DirectionalLights default to lighting only their own group
+        // (global='false'); point and spot lights default to global.
+        let global = n.field_or("global", !n.has_tag_name("DirectionalLight"))?;
+        let scope = if global {
+            None
+        } else {
+            self.scopes.last().copied()
+        };
+        self.scene.lights.push(Light {
+            kind,
+            color,
+            intensity,
+            ambient_intensity,
+            scope,
+        });
+        Ok(())
+    }
+
+    fn viewpoint(&mut self, n: Node<'a, 'i>, world: Mat4) -> Result<()> {
+        if n.has_tag_name("OrthoViewpoint") {
+            self.scene
+                .report
+                .approximated("OrthoViewpoint (shown in perspective)");
+        }
+        let d = Viewpoint::default();
+        let (_, rotation, _) = world.to_scale_rotation_translation();
+        self.scene.viewpoints.push(Viewpoint {
+            description: n.attribute("description").unwrap_or_default().to_owned(),
+            position: world.transform_point3(n.field_or("position", d.position)?),
+            orientation: rotation * n.field_or("orientation", Quat::IDENTITY)?,
+            field_of_view: n.field_or("fieldOfView", d.field_of_view)?,
+            center_of_rotation: world.transform_point3(n.field_or("centerOfRotation", Vec3::ZERO)?),
+        });
+        Ok(())
+    }
+
+    fn background(&mut self, n: Node<'a, 'i>) -> Result<()> {
+        if std::mem::replace(&mut self.seen_background, true) {
+            return Ok(()); // only the first Background is bound
+        }
+        let b = Background {
+            sky_colors: n.field_or("skyColor", vec![Vec3::ZERO])?,
+            sky_angles: n.field_or("skyAngle", Vec::new())?,
+            ground_colors: n.field_or("groundColor", Vec::new())?,
+            ground_angles: n.field_or("groundAngle", Vec::new())?,
+            transparency: n.field_or("transparency", 0.0)?,
+        };
+        if b.sky_colors.len() > 1 || !b.ground_colors.is_empty() {
+            self.scene
+                .report
+                .approximated("Background gradient (zenith colour only; see the sky quest)");
+        }
+        if [
+            "frontUrl",
+            "backUrl",
+            "leftUrl",
+            "rightUrl",
+            "topUrl",
+            "bottomUrl",
+        ]
+        .iter()
+        .any(|u| n.attribute(*u).is_some())
+        {
+            self.scene.report.unsupported("Background panorama images");
+        }
+        self.scene.background = b;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Scene {
+        let s = &mut self.scene;
+        let mut stats = s.report.stats;
+        stats.shapes = s.draws.len();
+        stats.unique_meshes = s.unique_meshes().len();
+        for d in &s.draws {
+            let n = d.mesh.primitive_count();
+            match d.mesh.topology {
+                Topology::Triangles => stats.triangles += n,
+                Topology::Lines => stats.line_segments += n,
+                Topology::Points => stats.points += n,
+            }
+        }
+        stats.lights = s.lights.len();
+        stats.viewpoints = s.viewpoints.len();
+        s.report.stats = stats;
+        self.scene
+    }
+}
+
+/// The optional per-corner index lists of a polygon geometry.
+/// 🦀 A *parameter struct*: named fields instead of a row of `&[i32]`
+/// arguments, and `Default` (all empty) for geometries that have none.
+#[derive(Debug, Clone, Copy, Default)]
+struct Indices<'x> {
+    color: &'x [i32],
+    normal: &'x [i32],
+    tex: &'x [i32],
+}
+
+/// `coordIndex` → faces of non-negative indices.
+fn to_faces(index: &[i32]) -> Vec<Vec<u32>> {
+    geometry::split_at_minus_one(index)
+        .into_iter()
+        .map(|f| f.into_iter().map(|i| i as u32).collect())
+        .collect()
+}
+
+/// X3D's Transform: `T · C · R · SR · S · SR⁻¹ · C⁻¹`.
+fn transform_matrix(n: Node<'_, '_>) -> Result<Mat4> {
+    let t: Vec3 = n.field_or("translation", Vec3::ZERO)?;
+    let r: Quat = n.field_or("rotation", Quat::IDENTITY)?;
+    let s: Vec3 = n.field_or("scale", Vec3::ONE)?;
+    let sr: Quat = n.field_or("scaleOrientation", Quat::IDENTITY)?;
+    let c: Vec3 = n.field_or("center", Vec3::ZERO)?;
+    Ok(Mat4::from_translation(t + c)
+        * Mat4::from_quat(r)
+        * Mat4::from_quat(sr)
+        * Mat4::from_scale(s)
+        * Mat4::from_quat(sr.inverse())
+        * Mat4::from_translation(-c))
+}
