@@ -143,12 +143,18 @@ pub fn camera_for(scene: &Scene, viewpoint: Option<usize>) -> OrbitCamera {
 
 /// Render a scene to an image in one call.
 pub fn render_scene(gpu: &Gpu, scene: &Scene, shot: &Shot) -> Result<RgbaImage, ReadbackError> {
+    log::debug!("render_scene phase=renderer-new");
     let mut renderer = Renderer::new(gpu, wgpu::TextureFormat::Rgba8Unorm, shot.msaa);
+    log::debug!("render_scene phase=scene-upload");
     renderer.set_scene(scene);
     let camera = camera_for(scene, shot.viewpoint);
     let target = Offscreen::new(&gpu.device, shot.size, renderer.color_format());
+    log::debug!("render_scene phase=render");
     renderer.render(&target.view, shot.size, &camera, &shot.settings);
-    target.read(gpu)
+    log::debug!("render_scene phase=readback");
+    let image = target.read(gpu)?;
+    log::debug!("render_scene phase=complete");
+    Ok(image)
 }
 
 /// All seven debug views in a 4 × 2 grid — a quick way to *see* normals,

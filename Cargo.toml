@@ -8,7 +8,7 @@ members = ["crates/x3d-scene", "crates/x3d-render"]
 
 # 🦀 Shared metadata: member crates say `edition.workspace = true`.
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
