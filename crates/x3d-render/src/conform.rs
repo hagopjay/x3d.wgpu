@@ -151,6 +151,7 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
         }
         let mut got_gamma22 = None;
         let (got, delta) = if verdict.is_empty() {
+            log::info!("conformance row={id} scene={} source={source}: loading", scene_path.display());
             let scene = x3d_scene::load(&scene_path)?;
             let size = row["size"].as_array().map_or((128, 128), |s| {
                 (
@@ -159,10 +160,15 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
                 )
             });
             let shot = Shot { size, msaa: 1, settings: RenderSettings::default(), viewpoint: None };
+            // Emit context before crossing into the native driver: a SIGSEGV
+            // cannot unwind Rust or print the completed receipt afterwards.
+            log::info!("conformance row={id} encode=srgb size={}x{}: render begin", size.0, size.1);
             let img = render_scene(gpu, &scene, &shot)?;
             let got = probe(&img, &probe_name);
             let g22 = Shot { settings: RenderSettings { encode: Encode::Gamma22, ..Default::default() }, ..shot };
+            log::info!("conformance row={id} encode=gamma22 size={}x{}: render begin", size.0, size.1);
             got_gamma22 = Some(probe(&render_scene(gpu, &scene, &g22)?, &probe_name));
+            log::info!("conformance row={id}: render complete");
             let delta = (0..3).map(|c| got[c].abs_diff(exp[c])).max().unwrap_or(0);
             verdict = if delta <= max_delta { "pass" } else { "fail" }.into();
             (Some(got), Some(delta))

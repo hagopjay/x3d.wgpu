@@ -10,38 +10,75 @@ env:
   CARGO_TERM_COLOR: always
   # A GPU test that finds no adapter FAILS instead of skipping.
   X3D_REQUIRE_GPU: "1"
-  RUST_LOG: x3d_render=info,wgpu_core=warn
+  RUST_LOG: x3d_render=info,x3d_render::headless=debug,wgpu_core=warn
   RUST_BACKTRACE: "1"
 
 jobs:
   # Software Vulkan (lavapipe) on a stock runner: every GPU test really runs.
   lavapipe:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools gdb ripgrep
+      - name: Select the software Vulkan ICD explicitly
+        run: |
+          lvp_icd=$(rg --files /usr/share/vulkan/icd.d | rg '/lvp_icd[^/]*\.json$' | head -n 1)
+          test -n "$lvp_icd"
+          echo "VK_DRIVER_FILES=$lvp_icd" >> "$GITHUB_ENV"
+      - name: Runner diagnostics (sources for Mesa, LLVM, CPU and stack settings)
+        run: |
+          set -o pipefail
+          {
+            git rev-parse HEAD
+            uname -a
+            rustc -Vv
+            cargo -V
+            dpkg-query -W 'mesa-vulkan-drivers' 'libllvm*' 'libvulkan1' || true
+            lscpu
+            rg 'Cpus_allowed_list' /proc/self/status
+            printf 'VK_DRIVER_FILES=%s\n' "$VK_DRIVER_FILES"
+            printf 'RUST_MIN_STACK=%s\n' "${RUST_MIN_STACK:-unset (libtest default)}"
+            ulimit -s
+            vulkaninfo --summary
+          } 2>&1 | tee runner.txt
       - name: Adapter and budget (every setting names its source)
         run: cargo run -q --release -- adapters --budget --backend vulkan | tee budget.txt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Runner diagnostics (Mesa, LLVM, CPU) for lavapipe crashes
-        continue-on-error: true
+      # Exercise the fixture with libtest's normal parallel scheduling before
+      # the serial suite warms driver caches. The fixture itself must prevent
+      # overlapping conformance devices, independently of the CLI thread limit.
+      - name: Conformance fixture under default parallel scheduling (required)
+        id: conformance-parallel
         run: |
-          dpkg -l | grep -E 'mesa-vulkan|libllvm|libvulkan1' || true
-          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | cut -c1-400 || true
-          rustc -V
-      # lavapipe is fragile with several devices alive in one process (seen as a
-      # SIGSEGV in tests/conformance.rs on the runner), so GPU tests run serially.
-      - run: cargo test --workspace -- --test-threads=1
+          set -o pipefail
+          export MESA_SHADER_CACHE_DIR
+          MESA_SHADER_CACHE_DIR=$(mktemp -d "$RUNNER_TEMP/x3d-conformance-mesa.XXXXXX")
+          export X3D_PIPELINE_CACHE=off
+          {
+            printf 'MESA_SHADER_CACHE_DIR=%s (fresh mktemp directory)\n' "$MESA_SHADER_CACHE_DIR"
+            printf 'X3D_PIPELINE_CACHE=%s\n' "$X3D_PIPELINE_CACHE"
+            cargo test -p x3d-render --test conformance -- --nocapture
+          } 2>&1 | tee conformance-parallel.txt
+      # Keep a separate serial run: it is both the software-driver workaround
+      # for the remaining GPU suites and a useful comparison on native crashes.
+      - name: Workspace tests (serial, uncaptured diagnostics)
+        id: workspace-tests
+        run: |
+          set -o pipefail
+          cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee workspace-tests.txt
       - name: Golden images and conformance (tables in the log)
-        run: cargo test -p x3d-render --test golden --test conformance -- --nocapture --test-threads=1
-      - name: Parallel conformance (diagnostic only; tells us if serial is what fixes it)
-        continue-on-error: true
-        run: cargo test -p x3d-render --test conformance
+        id: golden-conformance
+        run: |
+          set -o pipefail
+          cargo test -p x3d-render --test golden --test conformance -- --nocapture --test-threads=1 2>&1 | tee golden-conformance.txt
       - run: cargo build -p x3d-render --no-default-features   # headless-only build
       - name: Conformance receipt
         run: cargo run -q --release -- conform conformance --backend vulkan --receipt receipt.json
@@ -57,12 +94,30 @@ jobs:
           for f in scenes/*.x3d; do
             cargo run -q --release -- render "$f" -o "renders/$(basename "$f" .x3d).png" --backend vulkan
           done
+      # RUST_BACKTRACE covers Rust panics, not SIGSEGV in Mesa/LLVM. Preserve
+      # native stacks on a failing conformance run without masking its failure.
+      - name: Native conformance backtrace after a test failure
+        if: failure() && (steps.conformance-parallel.outcome == 'failure' || steps.workspace-tests.outcome == 'failure' || steps.golden-conformance.outcome == 'failure')
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p x3d-render --test conformance --no-run --message-format=json > conformance-build.jsonl
+          binary=$(python3 -c 'import json; print(next(x["executable"] for line in open("conformance-build.jsonl") if (x := json.loads(line)).get("reason") == "compiler-artifact" and x.get("executable") and x["target"]["name"] == "conformance"))')
+          timeout 180s gdb --batch --return-child-result \
+            -ex 'set pagination off' -ex 'set print thread-events off' \
+            -ex run -ex 'thread apply all bt' \
+            --args "$binary" --test-threads=1 --nocapture 2>&1 | tee conformance-native-backtrace.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lavapipe-evidence
           path: |
             budget.txt
+            runner.txt
+            workspace-tests.txt
+            conformance-parallel.txt
+            golden-conformance.txt
+            conformance-native-backtrace.txt
             receipt.json
             bench.txt
             renders/

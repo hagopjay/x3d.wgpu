@@ -1,0 +1,129 @@
+name: lavapipe native-crash investigation
+
+# Manual evidence collection only. Required CI uses the guarded fixture in
+# ci.yml. This checks out the original reported failure, before that fixture
+# removed concurrent device creation, so a native crash can still be observed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  X3D_REQUIRE_GPU: "1"
+  RUST_BACKTRACE: full
+  RUST_LOG: x3d_render=info,wgpu_core=warn
+  X3D_PIPELINE_CACHE: "off"
+
+jobs:
+  native-crash:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact baseline from the reported failed run
+        uses: actions/checkout@v4
+        with:
+          # Source: run 44554109959, job 135665392877. Deliberately fixed:
+          # do not add a user-supplied ref to this baseline investigation.
+          ref: 6861c41418599cd003efcf5c00e9da485e0dcddb
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools gdb ripgrep
+      - name: Select software Vulkan and preserve exact runner provenance
+        run: |
+          set -o pipefail
+          lvp_icd=$(rg --files /usr/share/vulkan/icd.d | rg '/lvp_icd[^/]*\.json$' | head -n 1)
+          test -n "$lvp_icd"
+          export VK_DRIVER_FILES="$lvp_icd"
+          printf 'VK_DRIVER_FILES=%s\n' "$VK_DRIVER_FILES" >> "$GITHUB_ENV"
+          {
+            printf 'workflow-run=%s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            git show -s --format=fuller HEAD
+            uname -a
+            printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-unset}" "${ImageVersion:-unset}" "$RUNNER_OS" "$RUNNER_ARCH"
+            rustc -Vv
+            cargo -V
+            getconf GNU_LIBC_VERSION
+            dpkg-query -W 'mesa-vulkan-drivers' 'libllvm*' 'libvulkan1' 'gdb' || true
+            lscpu
+            rg 'Cpus_allowed_list' /proc/self/status
+            printf 'VK_DRIVER_FILES=%s\n' "$VK_DRIVER_FILES"
+            printf 'RUST_MIN_STACK=%s\n' "${RUST_MIN_STACK:-unset (libtest default)}"
+            ulimit -s
+            vulkaninfo --summary
+          } 2>&1 | tee runner.txt
+      - name: Build the original conformance test executable
+        run: |
+          set -o pipefail
+          cargo test -p x3d-render --test conformance --locked --no-run --message-format=json 2> build-stderr.txt | tee build.jsonl
+          binary=$(python3 -c 'import json; print(next(x["executable"] for line in open("build.jsonl") if (x := json.loads(line)).get("reason") == "compiler-artifact" and x.get("executable") and x["target"]["name"] == "conformance"))')
+          test -x "$binary"
+          printf 'CONFORMANCE_BINARY=%s\n' "$binary" >> "$GITHUB_ENV"
+      - name: Compare cold default-parallel and serial native executions
+        run: |
+          set -o pipefail
+          # Unset any inherited libtest override for the first execution.
+          # Neither case reuses Mesa or application pipeline-cache contents.
+          unset RUST_TEST_THREADS
+          printf 'case\tnative_status\tlog_status\n' > native-status.tsv
+          run_case() {
+            local case_name=$1
+            shift
+            local case_cache
+            case_cache=$(mktemp -d "$RUNNER_TEMP/x3d-baseline-${case_name}.XXXXXX")
+            export MESA_SHADER_CACHE_DIR="$case_cache/mesa"
+            export XDG_CACHE_HOME="$case_cache/xdg"
+            mkdir -p "$MESA_SHADER_CACHE_DIR" "$XDG_CACHE_HOME"
+            {
+              printf 'case=%s\n' "$case_name"
+              printf 'executable=%s\n' "$CONFORMANCE_BINARY"
+              printf 'MESA_SHADER_CACHE_DIR=%s\nXDG_CACHE_HOME=%s\nX3D_PIPELINE_CACHE=%s\n' "$MESA_SHADER_CACHE_DIR" "$XDG_CACHE_HOME" "$X3D_PIPELINE_CACHE"
+              printf 'arguments=--nocapture'
+              printf ' %s' "$@"
+              printf '\n'
+            } | tee "${case_name}-environment.txt"
+            # A signal abort cannot produce a Rust backtrace. GDB stops at the
+            # signal and records native frames, stack mappings and instruction.
+            # Conditional dumps keep a normal successful exit successful.
+            set +e
+            timeout --signal=TERM --kill-after=10s 300s \
+              gdb --batch --return-child-result \
+              -ex 'set pagination off' -ex 'set print thread-events off' \
+              -ex run \
+              -ex 'python gdb.execute("thread apply all bt full") if gdb.selected_inferior().pid else None' \
+              -ex 'python gdb.execute("info proc mappings") if gdb.selected_inferior().pid else None' \
+              -ex 'python gdb.execute("info registers") if gdb.selected_inferior().pid else None' \
+              -ex 'python gdb.execute("x/i $pc") if gdb.selected_inferior().pid else None' \
+              --args "$CONFORMANCE_BINARY" --nocapture "$@" 2>&1 | tee "${case_name}-native.txt"
+            local statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\t%s\t%s\n' "$case_name" "${statuses[0]}" "${statuses[1]}" | tee -a native-status.tsv
+          }
+          # Always collect both cases, even if the original crash reproduces.
+          run_case parallel
+          run_case serial --test-threads=1
+          python3 - <<'PY'
+          import csv
+          import sys
+          with open("native-status.tsv", newline="") as source:
+              rows = list(csv.DictReader(source, delimiter="\t"))
+          if len(rows) != 2:
+              sys.exit("Missing native execution result; see collected logs")
+          sys.exit(any(int(row["native_status"]) or int(row["log_status"]) for row in rows))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lavapipe-original-baseline-native-evidence
+          path: |
+            runner.txt
+            build.jsonl
+            build-stderr.txt
+            native-status.tsv
+            parallel-environment.txt
+            parallel-native.txt
+            serial-environment.txt
+            serial-native.txt

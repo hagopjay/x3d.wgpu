@@ -239,6 +239,13 @@ adapter, with a per-adapter tolerance table that says why each row exists. **Con
 x3d_mcp validated it. **Fuzzing** (`fuzz/`, cargo-fuzz) hits the loader + animation runtime and
 the GLSL → naga path. Every number, with its source: [HARDENING.md](HARDENING.md).
 
+**Software-driver testing (0.5.1):** conformance tests hold an exclusive GPU
+fixture through device teardown, including under libtest's default parallel
+scheduling. CI also runs `cargo test --workspace -- --test-threads=1 --nocapture`
+with `RUST_BACKTRACE=1`, a cold-cache conformance guard, and native crash
+diagnostics. Evidence and the limits of the diagnosis are in
+[the lavapipe investigation](docs/LAVAPIPE-0.5.1.md).
+
 **No GPU?** Install a software Vulkan driver, and everything (window included,
 under Xvfb) works on the CPU:
 

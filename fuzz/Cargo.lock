@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "x3d-render"
-version = "0.2.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1749,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "x3d-scene"
-version = "0.2.0"
+version = "0.5.1"
 dependencies = [
  "bytemuck",
  "flate2",
