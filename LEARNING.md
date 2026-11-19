@@ -24,6 +24,11 @@ kinds of signposts:
 | 9 | `x3d-render/src/headless.rs` | readback, 256-byte row alignment, `mpsc` channels |
 | 9½ | `x3d-render/src/textures.rs` | mipmaps, anisotropy, bind groups per texture set, caching failures in an `Option` |
 | 10 | `x3d-render/src/viewer.rs` | winit's `ApplicationHandler`, threads, `Arc<Mutex<…>>`, surfaces |
+| 11 | `x3d-scene/src/runtime.rs` | an event cascade with a `VecDeque`, enums that carry state, slerp and HSV lerp |
+| 12 | `x3d-render/src/glsl.rs` + `custom.rs` | translating a shader dialect, naga as a library (parse → validate → reflect) |
+| 13 | `vs_wide` in `scene.wgsl` | instancing, clipping by hand, pixel-sized quads from clip space |
+| 14 | `x3d-render/src/post.rs` + `shaders/post.wgsl` | float render targets, mip chains as blur, tone curves |
+| 15 | `ShadowMap` in `renderer.rs`, `shadow_factor` in the shader | depth-only passes, comparison samplers, bias vs acne vs peter-panning |
 
 ## Habits that make this fun
 
@@ -54,18 +59,18 @@ know you're done. They're independent; pick what looks fun.
 
 **G5 ✅ Textures** — *done in 0.2, for Giza.* Read how: `Vertex::texcoord` (3D, so `TextureCoordinateGenerator` can store positions), `parse.rs` `texture`/`texcoords`/`texture_matrix`, `textures.rs`, and the top of `fs_main` (why every texture is sampled before any branch). **Follow-ups ★★:** generate mipmaps on the GPU in a compute shader, and do it gamma-correctly (the CPU version averages sRGB bytes, which darkens a little); honour `repeatS='false'` (it needs a second sampler); support `PixelTexture` (the Gobbler has one).
 
-**G6 ★★ Fat points and lines.** wgpu draws 1-pixel points and lines. Expand each point into a camera-facing quad (instancing: one quad mesh, one instance per point) so `PointProperties` sizes work, then do screen-space-width lines the same way. The galaxy in `04_lines_and_points.x3d` will thank you.
+**G6 ✅ Fat points and lines** — *done.* Read `vs_wide`: one instance per segment (a point is a zero-length segment), six vertices per quad, expanded in clip space by the width in pixels, and clipped against the near plane *before* the divide. That last part also cured lavapipe's tile smears from lines passing behind the camera. **Follow-up ★★:** round caps and joins (`LineProperties.linetype` dashes, too).
 
 **G7 ★★★ Instancing.** In `03_def_use_switch.x3d` 25 draws share one mesh. Group draws by (mesh, pipeline), put per-draw data in a *storage* buffer, and issue one `draw_indexed(.., 0..n)` per group, reading `@builtin(instance_index)` in the shader. Measure the draw-call count before and after.
 
 **G8 ✅ PBR for PhysicalMaterial** — *done in 0.2.* Read `shade_pbr` in the shader and the `physical_material_matches_x_ite` test (78/255, as X_ITE measured).
 **G8b ★★★ Image-based lighting.** Bare metals are dark because nothing surrounds them to reflect. Pre-filter an environment (start with the Background colours, then an HDR file) into a cube map with roughness mips, and add the split-sum specular term. X3D 4.1's `EnvironmentLight` is the node for it.
 
-**G8c ★★ Tone mapping.** `--exposure` only scales light. Add ACES or AgX as an option after `shade_pbr`, and compare night scenes like Giza's disco with and without it.
+**G8c ✅ Tone mapping and bloom** — *done.* Read `post.rs`. **Follow-ups ★★:** auto-exposure (average log-luminance from the smallest bloom mip, eased over time); a lens-dirt texture on the bloom; compare Giza's disco under ACES and AgX.
 
 **G8d ★★★ Gaussian splats.** Giza's Khufu has splat levels (`khufu-g*-splats-*.xml`, not in the repo) and Pantheon is 50,058 splats. Sort splats by depth each frame and draw them as instanced, alpha-blended quads.
 
-**G9 ★★★★ Shadows.** Render depth from the first DirectionalLight into a shadow map, sample it with a comparison sampler, add PCF. The still life is a good test bed.
+**G9 ✅ Sun shadows** — *done* (one map, fitted to the whole scene). **Follow-ups:** ★★ fit the map to the *view* frustum instead of the scene, so big scenes stay sharp; ★★★ cascaded shadow maps (Giza needs them); ★★★ SpotLight shadows (a perspective map) and PointLight shadows (a cube map); ★★ swap 3×3 PCF for Poisson disc or PCSS (soft shadows that harden near the caster).
 
 **G10 ★★★ Picking.** Render draw indices into an `R32Uint` target, read back the pixel under the cursor on click, and print the shape's `label` (its X3D node name and DEF).
 
@@ -77,7 +82,9 @@ know you're done. They're independent; pick what looks fun.
 
 **R1 ✅ Inline** — *done in 0.2.* Read `Loader::inline` and `InlineState`: a `&mut` lent down through each nested load (a reborrow), a stack for cycles, an `Arc<Scene>` cache so a file Inlined twice is parsed once, and `Scene::splice` renumbering LOD groups and light scopes. **Follow-up ★★:** `IMPORT`/`EXPORT` (Giza uses them to wire animations across files); they matter once there are ROUTEs to run.
 
-**R1b ★★★ Animation.** Run TimeSensors and interpolators (Position, Orientation, Color, Scalar) through ROUTEs, so the disco ball spins. You'll need node identities that survive loading (DEF names → indices) and a small event cascade each frame.
+**R1b ✅ Animation** — *done.* Read `runtime.rs`: `Scene::advance(t)` ticks every TimeSensor, pushes events into a queue, and follows ROUTEs, firing each route at most once per timestamp (X3D's loop breaking). `Changes` tells the renderer what to re-upload. **Follow-ups:** ★★ TouchSensor + picking (G10) so the Gobbler reacts to clicks; ★★★ a `Script` node with a tiny expression language; ★★★ ParticleSystem on the GPU with a compute shader.
+
+**R1c ✅ ComposedShader** — *done.* Read `glsl.rs` then `custom.rs`. **Follow-up ★★:** the `shaders --show` output is GLSL 450; ask naga to write it back out as WGSL and read what your shader became.
 
 **R2 ★★★ Ear clipping.** `convex='false'` faces are fan-triangulated (wrong for concave polygons). Project each face onto its dominant plane, ear-clip it, and add a proptest: for random simple polygons, the triangle areas must sum to the polygon's area.
 

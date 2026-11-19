@@ -66,9 +66,14 @@ pub struct FrameUniform {
     pub near_far: [f32; 4],
     /// Target width and height in pixels, then the line/point size multiplier.
     pub viewport: [f32; 4],
+    /// World → the sun's shadow-map clip space.
+    pub shadow_proj: [[f32; 4]; 4],
+    /// x: index of the shadow-casting light (−1 = no shadows), y: depth bias,
+    /// z: 1 / shadow-map size, w: one shadow texel in world units.
+    pub shadow: [f32; 4],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
-const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 80 * MAX_LIGHTS);
+const _: () = assert!(size_of::<FrameUniform>() == 64 + 64 + 16 * 4 + 64 + 16 + 80 * MAX_LIGHTS);
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.
 #[repr(C)]

@@ -344,3 +344,31 @@ fn bloom_spills_light_past_a_bright_edge() {
     assert!(beside(&glowing)[0] > 10, "bloom: the box glows onto the sky {:?}", beside(&glowing));
     assert!(close(center(&glowing), [255, 255, 255, 255], 1), "the box itself stays white");
 }
+
+#[test]
+fn the_sun_casts_a_shadow_when_asked() {
+    let Some(gpu) = gpu() else { return };
+    // A floor, a slab hovering over it, and a sun at 45° shining toward +x,
+    // so the slab's shadow lands one unit to its right. Camera: straight down.
+    let s = scene(
+        "<NavigationInfo headlight='false'/>
+         <Viewpoint position='0 6 0' orientation='1 0 0 -1.5708'/>
+         <DirectionalLight direction='1 -1 0' ambientIntensity='0'/>
+         <Shape><Appearance><Material diffuseColor='1 1 1'/></Appearance>
+           <IndexedFaceSet coordIndex='0 1 2 3 -1' solid='false'>
+             <Coordinate point='-3 0 -3, -3 0 3, 3 0 3, 3 0 -3'/></IndexedFaceSet></Shape>
+         <Transform translation='0 1 0'><Shape><Appearance><Material diffuseColor='1 1 1'/></Appearance>
+           <Box size='1 0.2 1'/></Shape></Transform>",
+    );
+    let render = |shadows: bool| {
+        let settings = RenderSettings { shadows, ..Default::default() };
+        render_scene(&gpu, &s, &Shot { size: (64, 64), msaa: 1, settings, viewpoint: Some(1) }).unwrap()
+    };
+    let (plain, shadowed) = (render(false), render(true));
+    // ~13 pixels per unit: x = −1.5 is open floor, x = +1 is in the shadow.
+    let (open, shade) = (|img: &RgbaImage| img.get_pixel(12, 32).0[0], |img: &RgbaImage| img.get_pixel(45, 32).0[0]);
+    assert!(open(&plain) > 150, "the floor is lit: {}", open(&plain));
+    assert_eq!(open(&plain), open(&shadowed), "shadows leave open floor alone");
+    assert_eq!(shade(&plain), open(&plain), "without shadows the whole floor is lit");
+    assert!(shade(&shadowed) < 30, "the slab's shadow: {}", shade(&shadowed));
+}

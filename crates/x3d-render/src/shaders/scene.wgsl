@@ -30,6 +30,8 @@ struct Frame {
     params: vec4u,
     near_far: vec4f,            // near, far planes; z..w = depth range shown by the Depth view
     viewport: vec4f,            // width, height (pixels), line/point size multiplier
+    shadow_proj: mat4x4f,       // world → the sun's shadow-map clip space
+    shadow: vec4f,              // light index (−1 = none), depth bias, 1/map size, texel in world units
     lights: array<Light, 16>,
 }
 
@@ -47,6 +49,10 @@ struct Draw {
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var shadow_map: texture_depth_2d;
+// A *comparison* sampler: it answers "is the stored depth ≥ mine?" and,
+// with linear filtering, blends the answers of 4 texels (free 2×2 PCF).
+@group(0) @binding(2) var shadow_sampler: sampler_comparison;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(2) @binding(0) var t_base: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
@@ -206,6 +212,42 @@ fn sample_light(light: Light, p: vec3f) -> LightSample {
     return LightSample(l, reach);
 }
 
+// --- shadows -----------------------------------------------------------------
+//
+// 🎨 A shadow map is a depth picture taken *from the light*. To shade a
+// point we move it into that picture and compare: if something nearer to
+// the light was recorded there, the point is in shadow.
+
+fn shadow_factor(p: vec3f, n: vec3f) -> f32 {
+    // Nudge along the normal by about a texel: fights "shadow acne", the
+    // stripes a surface gets from shadowing itself.
+    let q = frame.shadow_proj * vec4f(p + n * frame.shadow.w * 1.5, 1.0);
+    let ndc = q.xyz / q.w;
+    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) || ndc.z > 1.0 { return 1.0; }
+    // 3×3 PCF (each tap already 2×2 filtered): soft-ish edges.
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let o = vec2f(f32(x), f32(y)) * frame.shadow.z;
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, ndc.z - frame.shadow.y);
+        }
+    }
+    return lit / 9.0;
+}
+
+// How much of light `i` is unblocked at `p` (1 unless it is the sun).
+fn unshadowed(i: u32, p: vec3f, n: vec3f) -> f32 {
+    if i32(i) != i32(frame.shadow.x) { return 1.0; }
+    return shadow_factor(p, n);
+}
+
+// Shadow pass: only depth, seen from the light.
+@vertex
+fn vs_shadow(@location(0) position: vec3f) -> @builtin(position) vec4f {
+    return frame.shadow_proj * draw.model * vec4f(position, 1.0);
+}
+
 // --- X3D classic lighting (ISO/IEC 19775-1, 17.2.2.4 "Lighting equations") --
 //
 //   colour = emissive + Σ_lights  on · attenuation · spot · lightColour ·
@@ -233,7 +275,7 @@ fn shade_classic(p: vec3f, n: vec3f, base: vec3f, emissive: vec3f, specular: vec
             let h = normalize(s.l + v);  // Blinn's half vector
             spec = intensity * specular * pow(max(dot(n, h), 0.0), shininess);
         }
-        sum += s.reach * color * (ambient + diffuse + spec);
+        sum += s.reach * color * (ambient + unshadowed(i, p, n) * (diffuse + spec));
     }
     return clamp(emissive + sum, vec3f(0.0), vec3f(1.0));
 }
@@ -257,7 +299,7 @@ fn shade_pbr(p: vec3f, n: vec3f, base: vec3f, metallic: f32, roughness: f32, ao:
         if !light_reaches(i) { continue; }
         let light = frame.lights[i];
         let s = sample_light(light, p);
-        let radiance = light.color_intensity.rgb * light.color_intensity.w * s.reach;
+        let radiance = light.color_intensity.rgb * light.color_intensity.w * s.reach * unshadowed(i, p, n);
         sum += light.direction_ambient.w * light.color_intensity.rgb * diffuse_color * ao * s.reach;
         let n_dot_l = max(dot(n, s.l), 0.0);
         if n_dot_l <= 0.0 { continue; }
