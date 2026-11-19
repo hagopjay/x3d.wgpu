@@ -1,0 +1,118 @@
+# Learning with x3d.wgpu
+
+This project is meant to be read, broken and extended. The code carries two
+kinds of signposts:
+
+- **🎨** a graphics idea (pipelines, winding, normal matrices, MSAA resolve…)
+- **🦀** a Rust idea (lifetimes, traits, iterators, error types, features…)
+
+`grep -rn "🎨\|🦀" crates/` gives you a guided tour.
+
+## A reading path
+
+| Step | Read | You'll meet |
+|---|---|---|
+| 0 | `crates/x3d-render/examples/hello_triangle.rs` | the whole wgpu pipeline in ~150 lines |
+| 1 | `x3d-scene/src/fields.rs` | traits + generics, const generics, `collect::<Result<…>>` |
+| 2 | `x3d-scene/src/scene.rs` | `#[repr(C)]`, `cfg_attr` derives, `FromIterator`, `Arc` sharing |
+| 3 | `x3d-scene/src/geometry.rs` | fan triangulation, Newell normals, creaseAngle, enums with data |
+| 4 | `x3d-scene/src/parse.rs` | zero-copy parsing with lifetimes, extension traits, match guards |
+| 5 | `x3d-render/src/gpu.rs` | instance → adapter → device, `async` + `pollster`, feature detection |
+| 6 | `x3d-render/src/uniforms.rs` + `shaders/scene.wgsl` | WGSL layout rules, `bytemuck::Pod`, compile-time size checks |
+| 7 | `x3d-render/src/renderer.rs` | bind groups, dynamic offsets, pipeline cache, MSAA, transparency sort |
+| 8 | `x3d-render/src/camera.rs` | view/projection matrices, why wgpu's NDC is "directx" in glam |
+| 9 | `x3d-render/src/headless.rs` | readback, 256-byte row alignment, `mpsc` channels |
+| 9½ | `x3d-render/src/textures.rs` | mipmaps, anisotropy, bind groups per texture set, caching failures in an `Option` |
+| 10 | `x3d-render/src/viewer.rs` | winit's `ApplicationHandler`, threads, `Arc<Mutex<…>>`, surfaces |
+
+## Habits that make this fun
+
+- **Keep the viewer open while you work.** `cargo run --release -- view scenes/01_primitives.x3d --shader crates/x3d-render/src/shaders/scene.wgsl` reloads the scene *and* the shader on every save.
+- **Press 6** (facing view) whenever something looks wrong: red means you're seeing back faces, so the winding is reversed.
+- **Press 2** (normals) to check lighting inputs before blaming the lighting.
+- **`render --sheet`** shows all six views at once. Good for bug reports.
+- **`RUST_LOG=info`** (or `wgpu_core=warn,x3d_render=debug`) for more detail.
+- **Write the test first.** The GPU tests in `crates/x3d-render/tests/render.rs` check real pixels; copy one and change the expectation.
+
+## Quests
+
+Graded ★ (an evening) to ★★★★ (a project). Each says where to start and how to
+know you're done. They're independent; pick what looks fun.
+
+### 🎨 Graphics
+
+**G1 ★ Play with hello_triangle.** Swap two vertices, add back-face culling, switch to `LineStrip`, change `SIZE` to 500 and watch the readback break (then fix it as `headless::read_texture` does).
+*Done when* you can explain why 500 px breaks it and 512 doesn't.
+
+**G2 ★★ Gradient skies.** `Background` already parses `skyColor`/`skyAngle`/`groundColor`/`groundAngle`. Draw a full-screen triangle before the scene whose fragment shader turns each pixel into a view ray (inverse view-projection), takes its angle from straight up, and blends the colours (X3D 24.4.1). 13 of the 92 x3d.demo scenes use a gradient.
+*Done when* `report.approximated` no longer mentions Background gradients.
+
+**G3 ★★ Reversed-Z.** Swap to `directx::perspective_infinite_reverse`, clear depth to 0.0, compare with `Greater`. Then zoom out on the terrain and compare z-fighting before and after.
+*Why:* float precision is densest near 0; reversed-Z puts it where distance needs it.
+
+**G4 ★★ Real GPU timing.** Request `Features::TIMESTAMP_QUERY`, write timestamps at the start and end of the pass, resolve them into a buffer, and show GPU ms in the title next to the CPU ms.
+
+**G5 ✅ Textures** — *done in 0.2, for Giza.* Read how: `Vertex::texcoord` (3D, so `TextureCoordinateGenerator` can store positions), `parse.rs` `texture`/`texcoords`/`texture_matrix`, `textures.rs`, and the top of `fs_main` (why every texture is sampled before any branch). **Follow-ups ★★:** generate mipmaps on the GPU in a compute shader, and do it gamma-correctly (the CPU version averages sRGB bytes, which darkens a little); honour `repeatS='false'` (it needs a second sampler); support `PixelTexture` (the Gobbler has one).
+
+**G6 ★★ Fat points and lines.** wgpu draws 1-pixel points and lines. Expand each point into a camera-facing quad (instancing: one quad mesh, one instance per point) so `PointProperties` sizes work, then do screen-space-width lines the same way. The galaxy in `04_lines_and_points.x3d` will thank you.
+
+**G7 ★★★ Instancing.** In `03_def_use_switch.x3d` 25 draws share one mesh. Group draws by (mesh, pipeline), put per-draw data in a *storage* buffer, and issue one `draw_indexed(.., 0..n)` per group, reading `@builtin(instance_index)` in the shader. Measure the draw-call count before and after.
+
+**G8 ✅ PBR for PhysicalMaterial** — *done in 0.2.* Read `shade_pbr` in the shader and the `physical_material_matches_x_ite` test (78/255, as X_ITE measured).
+**G8b ★★★ Image-based lighting.** Bare metals are dark because nothing surrounds them to reflect. Pre-filter an environment (start with the Background colours, then an HDR file) into a cube map with roughness mips, and add the split-sum specular term. X3D 4.1's `EnvironmentLight` is the node for it.
+
+**G8c ★★ Tone mapping.** `--exposure` only scales light. Add ACES or AgX as an option after `shade_pbr`, and compare night scenes like Giza's disco with and without it.
+
+**G8d ★★★ Gaussian splats.** Giza's Khufu has splat levels (`khufu-g*-splats-*.xml`, not in the repo) and Pantheon is 50,058 splats. Sort splats by depth each frame and draw them as instanced, alpha-blended quads.
+
+**G9 ★★★★ Shadows.** Render depth from the first DirectionalLight into a shadow map, sample it with a comparison sampler, add PCF. The still life is a good test bed.
+
+**G10 ★★★ Picking.** Render draw indices into an `R32Uint` target, read back the pixel under the cursor on click, and print the shape's `label` (its X3D node name and DEF).
+
+**G12 ★★ Fog.** Implement X3D `Fog` and `LocalFog` (LINEAR and EXPONENTIAL) in the fragment shader. The Osiris Shaft has a `LocalFog` waiting for it.
+
+**G11 ★★ Billboards, properly.** Keep Billboard as its own node in the scene and rebuild its matrix each frame from the camera (around `axisOfRotation`, or screen-aligned when it's `0 0 0`).
+
+### 🦀 Rust
+
+**R1 ✅ Inline** — *done in 0.2.* Read `Loader::inline` and `InlineState`: a `&mut` lent down through each nested load (a reborrow), a stack for cycles, an `Arc<Scene>` cache so a file Inlined twice is parsed once, and `Scene::splice` renumbering LOD groups and light scopes. **Follow-up ★★:** `IMPORT`/`EXPORT` (Giza uses them to wire animations across files); they matter once there are ROUTEs to run.
+
+**R1b ★★★ Animation.** Run TimeSensors and interpolators (Position, Orientation, Color, Scalar) through ROUTEs, so the disco ball spins. You'll need node identities that survive loading (DEF names → indices) and a small event cascade each frame.
+
+**R2 ★★★ Ear clipping.** `convex='false'` faces are fan-triangulated (wrong for concave polygons). Project each face onto its dominant plane, ear-clip it, and add a proptest: for random simple polygons, the triangle areas must sum to the polygon's area.
+
+**R3 ★★ Pretty errors.** Bring in `miette` and make `Error::Field` show the offending line of XML with the bad value underlined. roxmltree already gives you byte ranges.
+
+**R4 ★★ Data parallelism.** Tessellation is independent per geometry. Collect the geometry nodes first, then tessellate with `rayon`'s `par_iter`. What has to change about `Loader` for that to compile? (Hint: `&mut self` and `Send`.)
+
+**R5 ★★ Benchmarks.** Add `criterion` and benchmark `Polygons::tessellate` and `Mesh::weld` on a 512 × 512 ElevationGrid. Then try `ahash` or `FxHashMap` in `weld` and measure.
+
+**R6 ★★ A real watcher.** Swap the polling thread for the `notify` crate with debouncing. Keep the `EventLoopProxy` design.
+
+**R7 ★★★ An egui panel.** Add `egui-wgpu` + `egui-winit` (match their wgpu version!) and show the settings, the loss report and a scene tree with per-shape visibility toggles.
+
+**R8 ★★★★ In the browser.** wgpu runs on WebGPU. Build the viewer for `wasm32-unknown-unknown` with `trunk`. What has to go behind `#[cfg(not(target_arch = "wasm32"))]`? (The watcher thread and `pollster`, for a start.)
+
+**R9 ★★★★ ClassicVRML.** Write a `.x3dv` parser with `winnow` that builds the same scene. The `Loader` walks roxmltree nodes, so you'll want a small trait over "a node with fields and children" that both encodings implement.
+
+**R10 ★ Make the lints stricter.** Turn on `clippy::pedantic` in `Cargo.toml` and fix (or consciously `#[allow]`) what it finds.
+
+### 🧩 X3D fidelity (tying back to x3d.lab)
+
+**X1 ★★ A diff command.** Add `x3d-view diff a.png b.png` that prints the mean |Δ| per pixel (0–255), the metric the x3d.lab findings use, and writes a heat-map PNG.
+
+**X2 ★★★ Against X_ITE.** Render the same x3d.demo scenes with X_ITE (headless Chrome) and with `x3d-view render`, then diff them. Which nodes cause the biggest gaps? Each one is a quest of its own.
+
+**X3 ★★ Point and spot falloff.** x3d.lab found that glTF's 1/d² can't match X3D's default `attenuation='1 0 0'` (no falloff). This renderer implements X3D's formula directly. Build a scene that shows the difference, and add a pixel test.
+
+## Glossary
+
+- **Adapter / device / queue**: a GPU / your connection to it / where you submit work.
+- **Bind group**: a set of resources (buffers, textures) bound together; the shader sees them as `@group(n) @binding(m)`.
+- **Dynamic offset**: binding a different slice of one buffer per draw without a new bind group.
+- **Pipeline**: compiled shaders plus fixed-function state (topology, culling, blending, depth test).
+- **MSAA resolve**: averaging the multisampled image into a normal one at the end of a pass.
+- **NDC**: normalized device coordinates; in wgpu x, y ∈ [−1, 1] with y up, and depth ∈ [0, 1].
+- **Winding**: the order of a triangle's corners on screen; CCW = front face here (X3D `ccw='true'`).
+- **Normal matrix**: the inverse-transpose of the model matrix; keeps normals perpendicular under non-uniform scale.
+- **Crease angle**: X3D's threshold below which neighbouring faces share a smooth normal.

@@ -1,0 +1,29 @@
+[package]
+name = "x3d-scene"
+description = "Parse the easy, static subset of X3D (XML encoding) into GPU-ready meshes. No GPU code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+roxmltree = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+# 🦀 Optional dependency = Cargo feature. `.x3dz` (gzipped X3D) support only
+# compiles when the `gzip` feature is on (it is by default).
+flate2 = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+
+[features]
+default = ["gzip"]
+gzip = ["dep:flate2"]
+# Derive bytemuck::Pod on `Vertex` so renderers can upload it without copying.
+bytemuck = ["dep:bytemuck"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
