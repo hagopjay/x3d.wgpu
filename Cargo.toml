@@ -4,7 +4,7 @@
 # renderer depends on it.
 [workspace]
 resolver = "3"
-members = ["crates/x3d-scene", "crates/x3d-render"]
+members = ["crates/x3d-scene", "crates/x3d-render", "crates/x3d-web"]
 
 # 🦀 Shared metadata: member crates say `edition.workspace = true`.
 [workspace.package]
@@ -51,3 +51,10 @@ needless_pass_by_value = "warn"
 # keeping our own code debuggable.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Browser build: small and fast to download (see web/build.sh).
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
