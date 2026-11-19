@@ -11,13 +11,14 @@
 //! 🦀 `clap`'s derive API: the CLI *is* these structs. Doc comments become
 //! `--help` text, field types become parsers, enums become subcommands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use x3d_render::{Backend, ColorMode, DebugView, Gpu, RenderSettings, Shot, ToneMap};
+use x3d_render::cull::Cull;
+use x3d_render::{Backend, ColorMode, DebugView, Gpu, Profile, RenderSettings, Shot, ToneMap};
 use x3d_scene::LoadOptions;
 
 #[derive(Parser, Debug)]
@@ -61,6 +62,31 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Render N frames off-screen and print per-pass GPU times (timestamp
+    /// queries), CPU time, culling counts and pipeline-cache effect.
+    Bench {
+        file: PathBuf,
+        #[arg(long, default_value_t = 60)]
+        frames: usize,
+        #[arg(long)]
+        viewpoint: Option<usize>,
+        #[arg(long, default_value_t = 0.0)]
+        time: f64,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Render conformance/expected.json and write a receipt (every number
+    /// names its source: the measurement, the validator, the adapter).
+    Conform {
+        /// The conformance folder (expected.json, validators/, scenes/).
+        #[arg(default_value = "conformance")]
+        dir: PathBuf,
+        /// Write the JSON receipt here.
+        #[arg(long)]
+        receipt: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = Backend::Auto)]
+        backend: Backend,
+    },
     /// Print what the loader kept, approximated and skipped.
     Info {
         file: PathBuf,
@@ -82,6 +108,12 @@ enum Command {
     Adapters {
         #[arg(long, value_enum, default_value_t = Backend::Auto)]
         backend: Backend,
+        /// Also open the best adapter and print the budget table: every
+        /// setting this GPU gets and the limit/feature it came from.
+        #[arg(long)]
+        budget: bool,
+        #[arg(long, value_enum, default_value_t = Profile::Auto)]
+        profile: Profile,
     },
 }
 
@@ -91,6 +123,9 @@ enum Command {
 struct Common {
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     backend: Backend,
+    /// `weak` emulates a WebGL2-class GPU (downlevel limits, no optional features).
+    #[arg(long, value_enum, default_value_t = Profile::Auto)]
+    profile: Profile,
     /// Image or window size, e.g. 1920x1080.
     #[arg(long, default_value = "1280x720")]
     size: Size,
@@ -140,9 +175,12 @@ struct Common {
     /// Linear brightness where bloom starts.
     #[arg(long, default_value_t = 0.8)]
     bloom_threshold: f32,
-    /// Shadows from the first DirectionalLight.
+    /// Shadows: lights with X3D shadows='true' (or the first DirectionalLight).
     #[arg(long)]
     shadows: bool,
+    /// Frustum culling: off, cpu, or gpu (compute pass + indirect draws).
+    #[arg(long, value_enum, default_value_t = Cull::Cpu)]
+    cull: Cull,
 }
 
 impl Common {
@@ -161,6 +199,7 @@ impl Common {
             bloom: self.bloom,
             bloom_threshold: self.bloom_threshold,
             shadows: self.shadows,
+            cull: self.cull,
         }
     }
     fn load_options(&self) -> LoadOptions {
@@ -196,6 +235,7 @@ fn main() -> Result<()> {
                 scene: file,
                 shader,
                 backend: common.backend,
+                profile: common.profile,
                 msaa: common.msaa,
                 size: (common.size.0, common.size.1),
                 settings: common.settings(),
@@ -203,6 +243,49 @@ fn main() -> Result<()> {
                 screenshot,
                 exit_after,
             })
+        }
+        Command::Conform { dir, receipt, backend } => {
+            let gpu = Gpu::headless(backend)?;
+            let root = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+            let r = x3d_render::conform::run(&gpu, &root, &dir)?;
+            println!("adapter: {}\nvalidator: {}\n", gpu.describe(), r.json["validator"]);
+            print!("{}", r.table());
+            println!("\n{}", r.json["summary"]);
+            if let Some(path) = receipt {
+                std::fs::write(&path, serde_json::to_string_pretty(&r.json)?)?;
+                println!("receipt: {}", path.display());
+            }
+            if !r.passed() {
+                bail!("conformance failed");
+            }
+            Ok(())
+        }
+        Command::Bench { file, frames, viewpoint, time, common } => {
+            let mut scene = x3d_scene::load_with(&file, &common.load_options())
+                .with_context(|| format!("loading {}", file.display()))?;
+            scene.advance(0.0);
+            if let Some(i) = viewpoint {
+                scene.bind_viewpoint(i);
+                scene.advance(0.0);
+            }
+            scene.advance(time);
+            let gpu = Gpu::headless_with(common.backend, common.profile)?;
+            let shot = Shot {
+                size: (common.size.0, common.size.1),
+                msaa: common.msaa,
+                settings: common.settings(),
+                viewpoint,
+            };
+            println!(
+                "{} at {}×{}, msaa {}, {:?}",
+                file.display(),
+                shot.size.0,
+                shot.size.1,
+                shot.msaa,
+                shot.settings.cull
+            );
+            print!("{}", x3d_render::bench::bench(&gpu, &scene, &shot, frames));
+            Ok(())
         }
         Command::Render { file, output, viewpoint, sheet, time, common } => {
             let t0 = Instant::now();
@@ -224,7 +307,7 @@ fn main() -> Result<()> {
                     bail!("viewpoint {i} doesn't exist; the scene has {}", scene.viewpoints.len());
                 }
             }
-            let gpu = Gpu::headless(common.backend)?;
+            let gpu = Gpu::headless_with(common.backend, common.profile)?;
             let shot = Shot {
                 size: (common.size.0, common.size.1),
                 msaa: common.msaa,
@@ -321,13 +404,17 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Adapters { backend } => {
+        Command::Adapters { backend, budget, profile } => {
             let adapters = x3d_render::gpu::list_adapters(backend);
             if adapters.is_empty() {
                 bail!("no adapters for {backend:?}");
             }
             for a in adapters {
                 println!("{}", x3d_render::gpu::describe(&a));
+            }
+            if budget {
+                let gpu = Gpu::headless_with(backend, profile)?;
+                println!("\nbudget on {} (profile {profile:?}):\n{}", gpu.describe(), gpu.budget);
             }
             Ok(())
         }

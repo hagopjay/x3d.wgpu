@@ -1,0 +1,57 @@
+{
+  "coverage": {
+    "files": 5
+  },
+  "development": false,
+  "environment": {
+    "optimized": false,
+    "python": "3.13.18"
+  },
+  "evidence": [],
+  "finished_at": "2026-11-19T14:45:29+00:00",
+  "grade": "C",
+  "instrument": {
+    "branch": "main",
+    "commit": "39c6e94b96f5211ac05408c64d28ea008f9df24a",
+    "dirty": false,
+    "path": "/home/claude/hagopjay/x3d_mcp",
+    "python": "/home/claude/hagopjay/x3d_mcp/.venv/bin/python",
+    "tool": "x3d_mcp fork (validate_xml + semantic_diagnostics)"
+  },
+  "limitations": [
+    "Fork commit 39c6e94 on branch main; not the family pin unless they match."
+  ],
+  "measurements": {
+    "conformance/scenes/ctrl_noenv_m0_r1_c0.5.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.0"
+    },
+    "conformance/scenes/ctrl_noenv_m1_r0_c1.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.0"
+    },
+    "conformance/scenes/exp2_a_unlit_default.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.0"
+    },
+    "conformance/scenes/exp2_b_legacy_default.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.0"
+    },
+    "conformance/scenes/exp2_c_physical_default.x3d": {
+      "xsd_errors": 0,
+      "xsd_valid": true,
+      "xsd_version": "4.0"
+    }
+  },
+  "origin": "executed",
+  "reason": "",
+  "schema": "loom.witness/1",
+  "status": "pass",
+  "subject_sha256": "bbf9efd90bb5fb0b9d04ed21341371bddbec4f6513d7944a92b0223ace6b05f3",
+  "witness": "grammar"
+}

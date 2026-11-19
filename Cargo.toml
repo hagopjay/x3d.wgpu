@@ -8,7 +8,7 @@ members = ["crates/x3d-scene", "crates/x3d-render"]
 
 # 🦀 Shared metadata: member crates say `edition.workspace = true`.
 [workspace.package]
-version = "0.2.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -31,10 +31,12 @@ clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 flate2 = "1"
 proptest = "1"
+serde_json = "1"
+sha2 = "0.10"
 
 # 🦀 Lints for every crate in the workspace. `cargo clippy` enforces these.
 [workspace.lints.rust]
-unsafe_code = "forbid"          # This whole project is 100% safe Rust.
+unsafe_code = "deny"            # Safe Rust, except one audited call in pipeline_cache.rs.
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]

@@ -402,6 +402,10 @@ pub struct Light {
     pub scope: Option<u32>,
     /// `on='false'` (or switched off by an event).
     pub on: bool,
+    /// X3D 4 `shadows`: this light casts shadows (when the renderer has them on).
+    pub shadows: bool,
+    /// X3D 4 `shadowIntensity` (0 = no darkening, 1 = full shadow).
+    pub shadow_intensity: f32,
     /// The transform node the light sits under ([`Scene::nodes`]).
     pub node: u32,
     /// `kind` in the node's own space; `kind` is this placed in the world.
@@ -462,6 +466,8 @@ impl Light {
             ambient_intensity: 0.0,
             scope: None,
             on: true,
+            shadows: false,
+            shadow_intensity: 1.0,
             node: 0,
             local: LightKind::Directional { direction: view_direction },
         }

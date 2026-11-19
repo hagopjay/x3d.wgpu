@@ -25,6 +25,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 use x3d_scene::{LoadOptions, Scene};
 
+use crate::budget::Profile;
 use crate::camera::OrbitCamera;
 use crate::gpu::{Backend, Gpu};
 use crate::headless::{Offscreen, camera_for};
@@ -46,6 +47,7 @@ pub struct ViewerOptions {
     /// Load the WGSL from this file (and hot-reload it) instead of the built-in copy.
     pub shader: Option<PathBuf>,
     pub backend: Backend,
+    pub profile: Profile,
     pub msaa: u32,
     pub size: (u32, u32),
     pub settings: RenderSettings,
@@ -183,14 +185,17 @@ impl App {
         // owned handle) makes it `Surface<'static>`: no lifetime to juggle.
         let instance = crate::gpu::make_instance(self.opts.backend);
         let surface = instance.create_surface(Arc::clone(&window))?;
-        let gpu = pollster::block_on(Gpu::new(instance, self.opts.backend, Some(&surface)))?;
+        let gpu = pollster::block_on(Gpu::new(instance, self.opts.backend, self.opts.profile, Some(&surface)))?;
         log::info!("GPU: {}", gpu.describe());
         println!("GPU: {}", gpu.describe());
 
         let caps = surface.get_capabilities(&gpu.adapter);
         // Prefer a non-sRGB format: our shader writes display-ready values.
         // (Renderer handles sRGB formats too, by decoding before the write.)
-        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+        let Some(&first) = caps.formats.first() else {
+            anyhow::bail!("this surface offers no formats on {} (is the window on another GPU?)", gpu.describe());
+        };
+        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(first);
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -390,8 +395,10 @@ impl State {
                 self.window.request_redraw();
                 return;
             }
+            // Timeout / Occluded: skip this frame; the next redraw retries.
             other => {
                 log::warn!("no frame this time: {other:?}");
+                self.window.request_redraw();
                 return;
             }
         };
@@ -508,6 +515,26 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // 🎨 Device lost (driver reset, GPU removed, TDR): everything
+                // made from the old device is dead. Drop it all and build a
+                // new window state on a fresh adapter + device.
+                if self.state.as_ref().is_some_and(|s| s.gpu.is_lost()) {
+                    log::error!("GPU device lost: rebuilding the renderer");
+                    self.state = None;
+                    let started = std::time::Instant::now();
+                    match self.init(event_loop) {
+                        Ok(state) => {
+                            log::info!("recovered from device loss in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+                            state.window.request_redraw();
+                            self.state = Some(state);
+                        }
+                        Err(e) => {
+                            self.failure = Some(e.context("recovering from a lost GPU device"));
+                            event_loop.exit();
+                        }
+                    }
+                    return;
+                }
                 let name = self.opts.scene.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let Some(s) = &mut self.state else { return };
                 // Animation: run the event graph to "now", push what changed.

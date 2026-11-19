@@ -55,6 +55,16 @@ pub struct Compiled {
     pub translated: glsl::Translated,
 }
 
+/// Where a program's pipelines draw: colour and depth formats, MSAA count,
+/// and the pipeline cache (if any).
+#[derive(Debug, Clone, Copy)]
+pub struct Target<'a> {
+    pub format: wgpu::TextureFormat,
+    pub depth: wgpu::TextureFormat,
+    pub samples: u32,
+    pub cache: Option<&'a wgpu::PipelineCache>,
+}
+
 /// Translate + parse + validate + reflect. `sprites`: drawn on a PointSet.
 /// The error text is ready to print (naga's errors point at the line).
 pub fn compile(src: &ShaderSource, sprites: bool) -> Result<Compiled, String> {
@@ -305,13 +315,12 @@ impl Program {
         device: &wgpu::Device,
         primitive: Primitive,
         blend: bool,
-        format: wgpu::TextureFormat,
-        depth: wgpu::TextureFormat,
-        samples: u32,
+        target: &Target<'_>,
     ) -> Option<&wgpu::RenderPipeline> {
+        let format = target.format;
         if !self.pipelines.contains_key(&(primitive, blend, format)) {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let pipeline = self.create(device, primitive, blend, format, depth, samples);
+            let pipeline = self.create(device, primitive, blend, target);
             if let Some(e) = pollster::block_on(scope.pop()) {
                 log::warn!("{}: {e}", self.label);
                 return None;
@@ -331,10 +340,9 @@ impl Program {
         device: &wgpu::Device,
         primitive: Primitive,
         blend: bool,
-        format: wgpu::TextureFormat,
-        depth: wgpu::TextureFormat,
-        samples: u32,
+        target: &Target<'_>,
     ) -> wgpu::RenderPipeline {
+        let Target { format, depth, samples, cache } = *target;
         let (topology, step_mode, cull) = match primitive {
             Primitive::Triangles { cull } => {
                 (wgpu::PrimitiveTopology::TriangleList, wgpu::VertexStepMode::Vertex, cull)
@@ -386,7 +394,7 @@ impl Program {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache,
         })
     }
 }

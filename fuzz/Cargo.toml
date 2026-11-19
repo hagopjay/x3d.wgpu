@@ -1,0 +1,32 @@
+[package]
+name = "x3d-wgpu-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+x3d-scene = { path = "../crates/x3d-scene" }
+x3d-render = { path = "../crates/x3d-render", default-features = false }
+
+# Its own workspace: the fuzz crate needs nightly-only flags and must not
+# join the main build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "glsl"
+path = "fuzz_targets/glsl.rs"
+test = false
+doc = false
+bench = false

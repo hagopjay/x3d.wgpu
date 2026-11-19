@@ -28,7 +28,11 @@ kinds of signposts:
 | 12 | `x3d-render/src/glsl.rs` + `custom.rs` | translating a shader dialect, naga as a library (parse → validate → reflect) |
 | 13 | `vs_wide` in `scene.wgsl` | instancing, clipping by hand, pixel-sized quads from clip space |
 | 14 | `x3d-render/src/post.rs` + `shaders/post.wgsl` | float render targets, mip chains as blur, tone curves |
-| 15 | `ShadowMap` in `renderer.rs`, `shadow_factor` in the shader | depth-only passes, comparison samplers, bias vs acne vs peter-panning |
+| 15 | `shadows.rs`, `sun_shadow`/`local_shadow` in the shader | depth-only passes, comparison samplers, cascades, texel snapping, cube faces from a 2D array |
+| 16 | `budget.rs`, `gpu.rs` | limits and features as data; deciding once, explaining every decision |
+| 17 | `timing.rs`, `bench.rs` | timestamp queries, async readback, `Arc<Mutex<…>>` state from a callback |
+| 18 | `cull.rs` + `shaders/cull.wgsl` | frustum planes from a matrix, compute shaders, atomics, indirect draws |
+| 19 | `conform.rs`, `tests/golden.rs`, `fuzz/` | receipts, tolerances with reasons, hashing inputs, fuzzing with libFuzzer |
 
 ## Habits that make this fun
 
@@ -55,7 +59,9 @@ know you're done. They're independent; pick what looks fun.
 **G3 ★★ Reversed-Z.** Swap to `directx::perspective_infinite_reverse`, clear depth to 0.0, compare with `Greater`. Then zoom out on the terrain and compare z-fighting before and after.
 *Why:* float precision is densest near 0; reversed-Z puts it where distance needs it.
 
-**G4 ★★ Real GPU timing.** Request `Features::TIMESTAMP_QUERY`, write timestamps at the start and end of the pass, resolve them into a buffer, and show GPU ms in the title next to the CPU ms.
+**G4 ✅ Real GPU timing** — *done in 0.4* (`timing.rs`, `x3d-view bench`). **Follow-up ★★:** show the last frame's pass times in the viewer's title (they're already in `FrameStats::gpu`).
+
+**G4b ★★★ One draw call.** GPU culling (`cull.rs`) decides visibility, but the CPU still issues one indirect call per draw. Merge all triangle meshes into one vertex/index buffer, move per-draw data into a storage buffer indexed by `instance_index` (`INDIRECT_FIRST_INSTANCE`), and replace the loop with one `multi_draw_indexed_indirect` per pipeline. Measure on Giza with `bench`.
 
 **G5 ✅ Textures** — *done in 0.2, for Giza.* Read how: `Vertex::texcoord` (3D, so `TextureCoordinateGenerator` can store positions), `parse.rs` `texture`/`texcoords`/`texture_matrix`, `textures.rs`, and the top of `fs_main` (why every texture is sampled before any branch). **Follow-ups ★★:** generate mipmaps on the GPU in a compute shader, and do it gamma-correctly (the CPU version averages sRGB bytes, which darkens a little); honour `repeatS='false'` (it needs a second sampler); support `PixelTexture` (the Gobbler has one).
 
@@ -70,7 +76,7 @@ know you're done. They're independent; pick what looks fun.
 
 **G8d ★★★ Gaussian splats.** Giza's Khufu has splat levels (`khufu-g*-splats-*.xml`, not in the repo) and Pantheon is 50,058 splats. Sort splats by depth each frame and draw them as instanced, alpha-blended quads.
 
-**G9 ✅ Sun shadows** — *done* (one map, fitted to the whole scene). **Follow-ups:** ★★ fit the map to the *view* frustum instead of the scene, so big scenes stay sharp; ★★★ cascaded shadow maps (Giza needs them); ★★★ SpotLight shadows (a perspective map) and PointLight shadows (a cube map); ★★ swap 3×3 PCF for Poisson disc or PCSS (soft shadows that harden near the caster).
+**G9 ✅ Shadows** — *done in 0.4:* texel-stable sun cascades, spot (perspective) and point (six faces) maps, X3D `shadows`/`shadowIntensity`. **Follow-ups:** ★★ blend between cascades at their seams; ★★ swap 3×3 PCF for Poisson disc or PCSS (soft shadows that harden near the caster); ★★ cull casters per cascade.
 
 **G10 ★★★ Picking.** Render draw indices into an `R32Uint` target, read back the pixel under the cursor on click, and print the shape's `label` (its X3D node name and DEF).
 
@@ -106,7 +112,7 @@ know you're done. They're independent; pick what looks fun.
 
 ### 🧩 X3D fidelity (tying back to x3d.lab)
 
-**X1 ★★ A diff command.** Add `x3d-view diff a.png b.png` that prints the mean |Δ| per pixel (0–255), the metric the x3d.lab findings use, and writes a heat-map PNG.
+**X1 ★ A diff command.** *The metric and the heat map exist* (`diff.rs`, used by the golden tests); wire them to the CLI. Add `x3d-view diff a.png b.png` that prints the mean |Δ| per pixel (0–255), the metric the x3d.lab findings use, and writes a heat-map PNG.
 
 **X2 ★★★ Against X_ITE.** Render the same x3d.demo scenes with X_ITE (headless Chrome) and with `x3d-view render`, then diff them. Which nodes cause the biggest gaps? Each one is a quest of its own.
 

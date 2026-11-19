@@ -2,6 +2,7 @@
 <!DOCTYPE X3D PUBLIC "ISO//Web3D//DTD X3D 4.0//EN" "https://www.web3d.org/specifications/x3d-4.0.dtd">
 <X3D profile='Interchange' version='4.0'>
   <head>
+    <component name='Grouping' level='2'/>
     <meta name='title' content='DEF/USE, Switch, transparency'/>
     <meta name='description' content='25 spheres share one mesh; a Switch picks one child; a glass slab is transparent.'/>
     <meta name='generator' content='x3d.wgpu sample scenes'/>

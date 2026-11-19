@@ -17,7 +17,8 @@ struct Light {
     position_kind: vec4f,       // xyz world location, w = kind (0 dir, 1 point, 2 spot)
     direction_ambient: vec4f,   // xyz world direction, w = ambientIntensity
     attenuation_radius: vec4f,  // xyz = (constant, linear, quadratic), w = radius
-    spot: vec4f,                // x = beamWidth, y = cutOffAngle (radians)
+    spot: vec4f,                // x = beamWidth, y = cutOffAngle (radians),
+                                // z = first shadow matrix (−1 = no shadow), w = shadowIntensity
 }
 
 struct Frame {
@@ -30,8 +31,11 @@ struct Frame {
     params: vec4u,
     near_far: vec4f,            // near, far planes; z..w = depth range shown by the Depth view
     viewport: vec4f,            // width, height (pixels), line/point size multiplier
-    shadow_proj: mat4x4f,       // world → the sun's shadow-map clip space
-    shadow: vec4f,              // light index (−1 = none), depth bias, 1/map size, texel in world units
+    shadow: vec4f,              // sun light index (−1 = none), cascade count, depth bias, sun shadowIntensity
+    cascade_far: vec4f,         // view-space distance where cascade i ends
+    cascade_texel: vec4f,       // one texel of cascade i, in world units (for the normal offset)
+    shadow_maps: vec4f,         // 1 / sun map size, 1 / local map size
+    shadow_mats: array<mat4x4f, 20>, // 0–3 sun cascades, 4–19 spot/point layers (world → light clip)
     lights: array<Light, 16>,
 }
 
@@ -49,10 +53,12 @@ struct Draw {
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var shadow_map: texture_depth_2d;
+@group(0) @binding(1) var sun_shadows: texture_depth_2d_array;
 // A *comparison* sampler: it answers "is the stored depth ≥ mine?" and,
 // with linear filtering, blends the answers of 4 texels (free 2×2 PCF).
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
+// Spot lights take one layer, point lights six (one per cube face).
+@group(0) @binding(3) var local_shadows: texture_depth_2d_array;
 @group(1) @binding(0) var<uniform> draw: Draw;
 @group(2) @binding(0) var t_base: texture_2d<f32>;
 @group(2) @binding(1) var t_normal: texture_2d<f32>;
@@ -218,34 +224,84 @@ fn sample_light(light: Light, p: vec3f) -> LightSample {
 // point we move it into that picture and compare: if something nearer to
 // the light was recorded there, the point is in shadow.
 
-fn shadow_factor(p: vec3f, n: vec3f) -> f32 {
-    // Nudge along the normal by about a texel: fights "shadow acne", the
-    // stripes a surface gets from shadowing itself.
-    let q = frame.shadow_proj * vec4f(p + n * frame.shadow.w * 1.5, 1.0);
-    let ndc = q.xyz / q.w;
-    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) || ndc.z > 1.0 { return 1.0; }
-    // 3×3 PCF (each tap already 2×2 filtered): soft-ish edges.
+// 3×3 PCF (each tap is already a bilinear 2×2 compare): soft-ish edges.
+fn pcf(map: texture_depth_2d_array, layer: i32, uv: vec2f, depth: f32, texel: f32) -> f32 {
     var lit = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
-            let o = vec2f(f32(x), f32(y)) * frame.shadow.z;
-            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, ndc.z - frame.shadow.y);
+            let o = vec2f(f32(x), f32(y)) * texel;
+            lit += textureSampleCompareLevel(map, shadow_sampler, uv + o, layer, depth);
         }
     }
     return lit / 9.0;
 }
 
-// How much of light `i` is unblocked at `p` (1 unless it is the sun).
+// Project `p` with shadow matrix `m`: (uv, depth, inside?).
+fn to_shadow(m: mat4x4f, p: vec3f) -> vec4f {
+    let q = m * vec4f(p, 1.0);
+    let ndc = q.xyz / q.w;
+    let uv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let inside = all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0)) && ndc.z <= 1.0 && q.w > 0.0;
+    return vec4f(uv, ndc.z, select(0.0, 1.0, inside));
+}
+
+// 🎨 Cascades: the sun gets 1–4 maps, each covering a farther slice of the
+// view, so texels near the camera are small and far ones big. Pick the
+// first cascade whose slice contains this pixel's view depth.
+fn sun_shadow(p: vec3f, n: vec3f) -> f32 {
+    let depth = -(frame.view * vec4f(p, 1.0)).z;
+    let count = i32(frame.shadow.y);
+    var c = -1;
+    for (var i = 0; i < count; i++) {
+        if depth <= frame.cascade_far[i] { c = i; break; }
+    }
+    if c < 0 { return 1.0; }
+    // Nudge along the normal by ~1.5 texels: fights "shadow acne".
+    let s = to_shadow(frame.shadow_mats[c], p + n * frame.cascade_texel[c] * 1.5);
+    if s.w == 0.0 { return 1.0; }
+    return pcf(sun_shadows, c, s.xy, s.z - frame.shadow.z, frame.shadow_maps.x);
+}
+
+// Spot: one perspective map. Point: six 90° maps; the face is the major
+// axis of (p − light), in the order +X −X +Y −Y +Z −Z.
+fn local_shadow(light: Light, p: vec3f, n: vec3f) -> f32 {
+    var m = i32(light.spot.z);
+    let to_p = p - light.position_kind.xyz;
+    if u32(light.position_kind.w) == 1u {
+        let a = abs(to_p);
+        if a.x >= a.y && a.x >= a.z {
+            m += select(1, 0, to_p.x > 0.0);
+        } else if a.y >= a.z {
+            m += select(3, 2, to_p.y > 0.0);
+        } else {
+            m += select(5, 4, to_p.z > 0.0);
+        }
+    }
+    // The normal offset grows with distance: perspective texels do too.
+    let offset = length(to_p) * frame.shadow_maps.y * 2.0;
+    let s = to_shadow(frame.shadow_mats[m], p + n * offset);
+    if s.w == 0.0 { return 1.0; }
+    return pcf(local_shadows, m - 4, s.xy, s.z - frame.shadow.z * 0.1, frame.shadow_maps.y);
+}
+
+// How much of light `i` is unblocked at `p` (X3D shadowIntensity scales it).
 fn unshadowed(i: u32, p: vec3f, n: vec3f) -> f32 {
-    if i32(i) != i32(frame.shadow.x) { return 1.0; }
-    return shadow_factor(p, n);
+    if i32(i) == i32(frame.shadow.x) {
+        return mix(1.0, sun_shadow(p, n), frame.shadow.w);
+    }
+    let light = frame.lights[i];
+    if light.spot.z < 0.0 { return 1.0; }
+    return mix(1.0, local_shadow(light, p, n), light.spot.w);
 }
 
 // Shadow pass: only depth, seen from the light.
+// Which shadow matrix this pass renders (a dynamic-offset uniform).
+struct ShadowPass { index: vec4u }
+@group(3) @binding(0) var<uniform> shadow_pass: ShadowPass;
+
 @vertex
 fn vs_shadow(@location(0) position: vec3f) -> @builtin(position) vec4f {
-    return frame.shadow_proj * draw.model * vec4f(position, 1.0);
+    return frame.shadow_mats[shadow_pass.index.x] * draw.model * vec4f(position, 1.0);
 }
 
 // --- X3D classic lighting (ISO/IEC 19775-1, 17.2.2.4 "Lighting equations") --

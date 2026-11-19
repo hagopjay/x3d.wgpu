@@ -1,0 +1,72 @@
+{
+  "coverage": {
+    "files": 8
+  },
+  "development": false,
+  "environment": {
+    "optimized": false,
+    "python": "3.13.18"
+  },
+  "evidence": [],
+  "finished_at": "2026-11-19T14:45:28+00:00",
+  "grade": "C",
+  "instrument": {
+    "branch": "main",
+    "commit": "39c6e94b96f5211ac05408c64d28ea008f9df24a",
+    "dirty": false,
+    "path": "/home/claude/hagopjay/x3d_mcp",
+    "python": "/home/claude/hagopjay/x3d_mcp/.venv/bin/python",
+    "tool": "x3d_mcp fork (validate_xml + semantic_diagnostics)"
+  },
+  "limitations": [
+    "Fork commit 39c6e94 on branch main; not the family pin unless they match."
+  ],
+  "measurements": {
+    "scenes/01_primitives.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/02_indexed_face_sets.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/03_def_use_switch.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/04_lines_and_points.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/05_still_life.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/06_terrain.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/07_strips_and_fans.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    },
+    "scenes/08_what_gets_skipped.x3d": {
+      "semantic_errors": 0,
+      "semantic_instrument_error": null,
+      "semantic_warnings": 0
+    }
+  },
+  "origin": "executed",
+  "reason": "",
+  "schema": "loom.witness/1",
+  "status": "pass",
+  "subject_sha256": "a8830b5ad0383214baac314e816e8b430fcd09e8430b29d5210f217aee1aa719",
+  "witness": "meaning"
+}

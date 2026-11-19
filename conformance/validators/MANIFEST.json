@@ -1,0 +1,124 @@
+{
+ "validator": {
+  "tool": "x3d_mcp fork (validate_xml + semantic_diagnostics)",
+  "commit": "39c6e94b96f5211ac05408c64d28ea008f9df24a",
+  "branch": "main",
+  "dirty": false
+ },
+ "witness_kit": {
+  "tool": "x3d.loom kit/loom grammar (grammar + meaning witnesses)",
+  "commit": "9a73e445ce79fd4652d277892ba273383d29a0c1"
+ },
+ "evidence": {
+  "grammar-conformance.json": "94c1649b7e56fe7beb44743a259afa89f5379fa180328d4a575ad00c9bbb0bad",
+  "grammar-samples.json": "22b5dc8ab45209dccefba64308372fd7ad56e1327fdd5d87bee36bc68334d49c",
+  "meaning-conformance.json": "b5332dffe849b7297c61b427b7a0b9168aa940f8ead7b2d95848881e78a407c7",
+  "meaning-samples.json": "50d7bdc202dae1e25bb569e371e0779115fa8e3682d2adee08a2f7512b4d5ac1"
+ },
+ "files": {
+  "conformance/scenes/ctrl_noenv_m0_r1_c0.5.x3d": {
+   "sha256": "7b155dd145e274963f3b8bcd5960514bf2fbe94e5dadfd80a71365809e2b0302",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "conformance/scenes/ctrl_noenv_m1_r0_c1.x3d": {
+   "sha256": "483259f1c4fb80c7c22430144739bdfe932897ecd7342492b5d78fb7dca2044c",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "conformance/scenes/exp2_a_unlit_default.x3d": {
+   "sha256": "ce8f3d5de841e6c04ed91664bacccc926fbdfd14f521a3eee2efb0aa080bf289",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "conformance/scenes/exp2_b_legacy_default.x3d": {
+   "sha256": "4607021faa5aae10aad893c366e305f847fc1f7b829d9f83a249c2fe9e74def6",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "conformance/scenes/exp2_c_physical_default.x3d": {
+   "sha256": "fdded681ae1890005479af82cab97bf19f965c730437ba5dd01b54f5180f22bd",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/01_primitives.x3d": {
+   "sha256": "81cd3cb58180e7fa873bd4170431b6e202a68a753cadecb69bd1596c51f1c204",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/02_indexed_face_sets.x3d": {
+   "sha256": "ea2488dcc3af1603206a9953bcb237e0a25c128334f682058a3e5fc0f603af8e",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/03_def_use_switch.x3d": {
+   "sha256": "6540c6946c6b5b6d268c0ec8090291292e49d6c76b26be83a47280d650cb42b7",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/04_lines_and_points.x3d": {
+   "sha256": "6e0d28a733d59d732b0bc10609b1426f06bf706c31a509f36c7fbb3818b27bd4",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/05_still_life.x3d": {
+   "sha256": "304742c2fe748dbd3ff83f8bb8e695ae87eb5f0ba50b4a6414af610614557c85",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/06_terrain.x3d": {
+   "sha256": "a45abdb5a7bc73d4feddbf20d45611171c642b1dae4c84a0d44006a990fa9ab9",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/07_strips_and_fans.x3d": {
+   "sha256": "ce9d98239cd3015603f8d37993b5c9b8926b94806cca1500c1f6a189d040bd5d",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  },
+  "scenes/08_what_gets_skipped.x3d": {
+   "sha256": "4dccf74038cd704a1b0c7f97f93369e1f9d8f0ea2179b3cdd8279f00daadf82f",
+   "xsd_valid": true,
+   "xsd_errors": 0,
+   "xsd_version": "4.0",
+   "semantic_errors": 0,
+   "semantic_warnings": 0
+  }
+ }
+}

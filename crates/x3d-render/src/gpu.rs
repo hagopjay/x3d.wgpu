@@ -13,6 +13,9 @@
 //! WGSL into SPIR-V (via `naga`) and records Vulkan command buffers.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::budget::{Budget, Profile};
 
 /// Which graphics API to use.
 ///
@@ -62,6 +65,11 @@ pub struct Gpu {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// What this GPU can afford, and why (see `budget.rs`).
+    pub budget: Budget,
+    /// Set by wgpu's device-lost callback (driver reset, GPU unplugged,
+    /// `device.destroy()`). The viewer polls it and rebuilds everything.
+    pub lost: Arc<AtomicBool>,
 }
 
 pub fn make_instance(backend: Backend) -> wgpu::Instance {
@@ -70,18 +78,29 @@ pub fn make_instance(backend: Backend) -> wgpu::Instance {
     wgpu::Instance::new(desc)
 }
 
+/// Optional features we use when the adapter has them.
+const WANTED: wgpu::Features = wgpu::Features::POLYGON_MODE_LINE
+    .union(wgpu::Features::TIMESTAMP_QUERY)
+    .union(wgpu::Features::PIPELINE_CACHE)
+    .union(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+
 impl Gpu {
     /// A GPU for off-screen work (no window).
     pub fn headless(backend: Backend) -> Result<Self, GpuError> {
+        Self::headless_with(backend, Profile::Auto)
+    }
+
+    pub fn headless_with(backend: Backend, profile: Profile) -> Result<Self, GpuError> {
         // 🦀 wgpu's setup is `async` (it must be on the web). On native we
         // simply block on the future with `pollster`.
-        pollster::block_on(Self::new(make_instance(backend), backend, None))
+        pollster::block_on(Self::new(make_instance(backend), backend, profile, None))
     }
 
     /// A GPU that can present to `surface` (if given).
     pub async fn new(
         instance: wgpu::Instance,
         backend: Backend,
+        profile: Profile,
         surface: Option<&wgpu::Surface<'_>>,
     ) -> Result<Self, GpuError> {
         let adapter = instance
@@ -93,22 +112,45 @@ impl Gpu {
             })
             .await
             .map_err(|source| GpuError::NoAdapter { backend, source })?;
+        log::info!("adapter: {}", describe(&adapter.get_info()));
 
-        // Ask only for optional features the adapter really has.
-        let wanted = wgpu::Features::POLYGON_MODE_LINE;
+        // 🎨 Limits-aware: ask for what the adapter *has* (capped by our
+        // profile), never for a fixed list it might not meet.
+        let (features, limits) = match profile {
+            Profile::Auto => (adapter.features() & WANTED, adapter.limits()),
+            Profile::Weak => {
+                (wgpu::Features::empty(), wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()))
+            }
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("x3d device"),
-                required_features: adapter.features() & wanted,
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+                required_features: features,
+                required_limits: limits,
                 ..Default::default()
             })
             .await?;
+        log::info!("device features: {features:?}");
 
         // By default wgpu *panics* on a validation error. A tinkering tool
         // should log instead (and the shader hot-reload path catches its own).
-        device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu: {e}")));
-        Ok(Self { instance, adapter, device, queue })
+        device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu validation error (reported, not fatal): {e}")));
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::error!("GPU device lost ({reason:?}): {message}");
+            flag.store(true, Ordering::SeqCst);
+        });
+        let budget = Budget::decide(&adapter, &device, profile);
+        for d in &budget.decisions {
+            log::info!("budget: {} = {} ({})", d.what, d.value, d.source);
+        }
+        Ok(Self { instance, adapter, device, queue, budget, lost })
+    }
+
+    /// Has the device been lost? Everything made from it is now useless.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
     }
 
     pub fn supports_wireframe(&self) -> bool {
