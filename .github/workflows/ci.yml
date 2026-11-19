@@ -123,6 +123,18 @@ jobs:
             renders/
             target/golden/
 
+  # The browser build must keep compiling (WebAssembly, WebGPU + WebGL2).
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p x3d-web --target wasm32-unknown-unknown --profile web
+      - run: ls -l target/wasm32-unknown-unknown/web/x3d_web.wasm
+
   # A real GPU, when a self-hosted runner labelled `gpu` exists and the
   # repository variable X3D_GPU_RUNNER is "true". Goldens use the `*` row of
   # crates/x3d-render/tests/golden/TOLERANCE unless a row names the adapter.

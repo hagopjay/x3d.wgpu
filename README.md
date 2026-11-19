@@ -266,3 +266,22 @@ Safe Rust (`unsafe_code = "deny"`), except one audited call in `pipeline_cache.r
 ## Licence
 
 MIT OR Apache-2.0.
+
+
+## In the browser (WebAssembly)
+
+`crates/x3d-web` compiles the same renderer to WebAssembly. `web/index.html` is a
+small page around it: WebGPU first, falling back to WebGL2 (wgpu's GL backend,
+which runs under the `Weak` budget: no HDR, no compute culling).
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
+web/build.sh                                  # writes web/dist/
+python3 -m http.server -d web/dist 8000       # open http://localhost:8000/
+```
+
+Add `?backend=gl` or `?backend=webgpu` to the URL to force one. Chrome may blocklist
+WebGPU on some Intel GPUs: enable `chrome://flags/#enable-unsafe-webgpu`, or let the
+page fall back to WebGL2. Scenes that need external files (Inline, textures) are
+not fetched by the page; paste self-contained X3D into the text box.
