@@ -11,6 +11,7 @@ env:
   # A GPU test that finds no adapter FAILS instead of skipping.
   X3D_REQUIRE_GPU: "1"
   RUST_LOG: x3d_render=info,wgpu_core=warn
+  RUST_BACKTRACE: "1"
 
 jobs:
   # Software Vulkan (lavapipe) on a stock runner: every GPU test really runs.
@@ -27,9 +28,20 @@ jobs:
         run: cargo run -q --release -- adapters --budget --backend vulkan | tee budget.txt
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - name: Runner diagnostics (Mesa, LLVM, CPU) for lavapipe crashes
+        continue-on-error: true
+        run: |
+          dpkg -l | grep -E 'mesa-vulkan|libllvm|libvulkan1' || true
+          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | cut -c1-400 || true
+          rustc -V
+      # lavapipe is fragile with several devices alive in one process (seen as a
+      # SIGSEGV in tests/conformance.rs on the runner), so GPU tests run serially.
+      - run: cargo test --workspace -- --test-threads=1
       - name: Golden images and conformance (tables in the log)
-        run: cargo test -p x3d-render --test golden --test conformance -- --nocapture
+        run: cargo test -p x3d-render --test golden --test conformance -- --nocapture --test-threads=1
+      - name: Parallel conformance (diagnostic only; tells us if serial is what fixes it)
+        continue-on-error: true
+        run: cargo test -p x3d-render --test conformance
       - run: cargo build -p x3d-render --no-default-features   # headless-only build
       - name: Conformance receipt
         run: cargo run -q --release -- conform conformance --backend vulkan --receipt receipt.json
