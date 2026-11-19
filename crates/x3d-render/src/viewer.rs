@@ -28,7 +28,7 @@ use x3d_scene::{LoadOptions, Scene};
 use crate::camera::OrbitCamera;
 use crate::gpu::{Backend, Gpu};
 use crate::headless::{Offscreen, camera_for};
-use crate::renderer::{ColorMode, RenderSettings, Renderer};
+use crate::renderer::{ColorMode, RenderSettings, Renderer, ToneMap};
 
 pub const HELP: &str = "\
 mouse  left-drag orbit · right/middle-drag pan · wheel zoom · drop a .x3d file to open it
@@ -36,7 +36,8 @@ mouse  left-drag orbit · right/middle-drag pan · wheel zoom · drop a .x3d fil
 Tab    next Viewpoint      F  frame everything    R  reset to the first Viewpoint
 W      wireframe           H  headlight on/off    C  colour mode (display ↔ linear)
 B      back-face culling   L  lines               P  points
-+ / -  exposure (PBR)       [ / ]  thinner/thicker lines and points    Space  pause/run animation
++ / -  exposure             [ / ]  thinner/thicker lines and points    Space  pause/run animation
+T      tone map (off · ACES · AgX)   G  bloom (glow)   O  sun shadows
 S      save screenshot     F5 reload              Esc quit";
 
 #[derive(Debug, Clone)]
@@ -309,6 +310,9 @@ impl App {
                     };
                 }
                 "b" => s.settings.cull_back_faces = !s.settings.cull_back_faces,
+                "t" => s.settings.tone_map = s.settings.tone_map.next(),
+                "g" => s.settings.bloom = if s.settings.bloom > 0.0 { 0.0 } else { 0.15 },
+                "o" => s.settings.shadows = !s.settings.shadows,
                 "l" => s.settings.show_lines = !s.settings.show_lines,
                 "p" => s.settings.show_points = !s.settings.show_points,
                 "f" => s.camera = OrbitCamera::framing(self.scene.bounds()),
@@ -406,6 +410,10 @@ impl State {
                 (s.wireframe, "wire"),
                 (s.color_mode == ColorMode::Linear, "linear"),
                 (!s.cull_back_faces, "no-cull"),
+                (s.tone_map == ToneMap::Aces, "ACES"),
+                (s.tone_map == ToneMap::Agx, "AgX"),
+                (s.bloom > 0.0, "bloom"),
+                (s.shadows, "shadows"),
                 (self.shader_error, "⚠shader"),
             ];
             let flags: Vec<&str> = flags.iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();

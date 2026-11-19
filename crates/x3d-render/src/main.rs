@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use x3d_render::{Backend, ColorMode, DebugView, Gpu, RenderSettings, Shot};
+use x3d_render::{Backend, ColorMode, DebugView, Gpu, RenderSettings, Shot, ToneMap};
 use x3d_scene::LoadOptions;
 
 #[derive(Parser, Debug)]
@@ -118,7 +118,8 @@ struct Common {
     /// Also load Inlines marked load='false'.
     #[arg(long)]
     load_all_inlines: bool,
-    /// Brighten or darken PhysicalMaterial lighting (1 = as X_ITE draws it).
+    /// Brighten or darken PhysicalMaterial lighting (1 = as X_ITE draws it);
+    /// with --tone-map or --bloom, all light.
     #[arg(long, default_value_t = 1.0)]
     exposure: f32,
     /// Multiply line widths and point sizes (e.g. 2 on a HiDPI screen).
@@ -130,6 +131,18 @@ struct Common {
     /// Don't draw PointSets.
     #[arg(long)]
     hide_points: bool,
+    /// Tone-mapping curve; anything but `off` renders in HDR first.
+    #[arg(long, value_enum, default_value_t = ToneMap::Off)]
+    tone_map: ToneMap,
+    /// Bloom strength (0 = off; 0.05–0.3 is a good range).
+    #[arg(long, default_value_t = 0.0)]
+    bloom: f32,
+    /// Linear brightness where bloom starts.
+    #[arg(long, default_value_t = 0.8)]
+    bloom_threshold: f32,
+    /// Shadows from the first DirectionalLight.
+    #[arg(long)]
+    shadows: bool,
 }
 
 impl Common {
@@ -144,6 +157,10 @@ impl Common {
             line_scale: self.line_scale,
             show_lines: !self.hide_lines,
             show_points: !self.hide_points,
+            tone_map: self.tone_map,
+            bloom: self.bloom,
+            bloom_threshold: self.bloom_threshold,
+            shadows: self.shadows,
         }
     }
     fn load_options(&self) -> LoadOptions {

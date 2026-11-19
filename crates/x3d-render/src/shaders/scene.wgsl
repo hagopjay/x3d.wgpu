@@ -157,7 +157,10 @@ fn srgb_to_linear(c: vec3f) -> vec3f {
 }
 
 fn linear_to_srgb(c: vec3f) -> vec3f {
-    let x = clamp(c, vec3f(0.0), vec3f(1.0));
+    // In HDR mode (params.w bit 2) keep values above 1: the tone mapper
+    // decides what to do with them. Otherwise clip, as an 8-bit screen would.
+    let top = select(1.0, 1e4, (frame.params.w & 4u) != 0u);
+    let x = clamp(c, vec3f(0.0), vec3f(top));
     return select(1.055 * pow(x, vec3f(1.0 / 2.4)) - 0.055, x * 12.92, x <= vec3f(0.0031308));
 }
 

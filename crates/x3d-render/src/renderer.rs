@@ -26,6 +26,7 @@ use x3d_scene::{Background, Draw, Light, LodTag, Mesh, Scene, ShaderSource, Swit
 use crate::camera::OrbitCamera;
 use crate::custom::{self, Primitive, Program};
 use crate::gpu::Gpu;
+use crate::post::{HDR_FORMAT, Post};
 use crate::textures::{MaterialTextures, TextureCache};
 use crate::uniforms::{DrawUniform, FrameUniform, GpuLight, MAX_LIGHTS};
 
@@ -80,6 +81,28 @@ pub enum ColorMode {
     Linear,
 }
 
+/// The curve that squeezes HDR light into what a screen can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ToneMap {
+    /// No curve: values above 1 clip (X_ITE's look).
+    #[default]
+    Off = 0,
+    /// The filmic S-curve most games used for a decade (Narkowicz fit).
+    Aces = 1,
+    /// Blender's default since 4.0: bright colours drift to white, not to yellow.
+    Agx = 2,
+}
+
+impl ToneMap {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Aces,
+            Self::Aces => Self::Agx,
+            Self::Agx => Self::Off,
+        }
+    }
+}
+
 /// Knobs you can flip at runtime.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderSettings {
@@ -97,6 +120,22 @@ pub struct RenderSettings {
     pub exposure: f32,
     /// Multiplies line widths and point sizes (e.g. 2 on a HiDPI screen).
     pub line_scale: f32,
+    /// Tone mapping; anything but `Off` turns on the HDR path (see `post`),
+    /// and then `exposure` scales *all* light, not only PhysicalMaterial's.
+    pub tone_map: ToneMap,
+    /// How much bright light bleeds into its surroundings (0 = no bloom).
+    pub bloom: f32,
+    /// Linear brightness where bloom starts (soft-kneed).
+    pub bloom_threshold: f32,
+    /// Sun shadows: the first DirectionalLight casts a shadow map.
+    pub shadows: bool,
+}
+
+impl RenderSettings {
+    /// True when the scene renders to a float target and goes through `post`.
+    pub fn hdr(&self) -> bool {
+        self.tone_map != ToneMap::Off || self.bloom > 0.0
+    }
 }
 
 impl Default for RenderSettings {
@@ -111,6 +150,10 @@ impl Default for RenderSettings {
             show_points: true,
             exposure: 1.0,
             line_scale: 1.0,
+            tone_map: ToneMap::Off,
+            bloom: 0.0,
+            bloom_threshold: 0.8,
+            shadows: false,
         }
     }
 }
@@ -211,6 +254,8 @@ struct PipelineKey {
     /// A ComposedShader program (index into `Renderer::programs`) instead
     /// of the built-in shader.
     program: Option<usize>,
+    /// Drawing into the float HDR target instead of the output format.
+    hdr: bool,
 }
 
 #[derive(Debug)]
@@ -258,6 +303,8 @@ pub struct Renderer {
     shader_sources: Vec<ShaderSource>,
     shader_fields: Vec<Value>,
     lights: Vec<Light>,
+    /// Bloom + tone mapping, created the first time HDR is switched on.
+    post: Option<Post>,
     background: Background,
     scene_headlight: bool,
     targets: Option<Targets>,
@@ -346,6 +393,7 @@ impl Renderer {
             background: Background::default(),
             scene_headlight: true,
             targets: None,
+            post: None,
             warned_lights: false,
             device,
         }
@@ -547,8 +595,14 @@ impl Renderer {
         });
         // Build one pipeline too: that catches entry points or bindings that
         // no longer match the Rust side.
-        let key =
-            PipelineKey { topology: Topology::Triangles, blend: false, cull: true, wireframe: false, program: None };
+        let key = PipelineKey {
+            topology: Topology::Triangles,
+            blend: false,
+            cull: true,
+            wireframe: false,
+            program: None,
+            hdr: false,
+        };
         let probe = self.create_pipeline(&module, key);
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(err.to_string());
@@ -613,7 +667,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.color_format,
+                    format: if key.hdr { HDR_FORMAT } else { self.color_format },
                     blend: key.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -657,6 +711,17 @@ impl Renderer {
         let started = Instant::now();
         let mut stats = FrameStats::default();
         self.ensure_targets(size);
+        let hdr = settings.hdr();
+        if hdr {
+            let post = self
+                .post
+                .get_or_insert_with(|| Post::new(&self.device, &self.queue, self.color_format, self.sample_count));
+            post.ensure(&self.device, size);
+        }
+        // In HDR the scene writes display values unclipped and unencoded;
+        // exposure is applied once, by the tone-mapping pass.
+        let srgb_out = self.color_format.is_srgb() && !hdr;
+        let exposure = if hdr { 1.0 } else { settings.exposure };
 
         // --- 1. per-frame uniform ------------------------------------------
         let aspect = size.0 as f32 / size.1.max(1) as f32;
@@ -676,12 +741,12 @@ impl Renderer {
         let mut frame = FrameUniform {
             view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
             view: view.to_cols_array_2d(),
-            camera_pos: camera.eye().extend(settings.exposure).into(),
+            camera_pos: camera.eye().extend(exposure).into(),
             params: [
                 lights.len().min(MAX_LIGHTS) as u32,
                 settings.view as u32,
                 settings.color_mode as u32,
-                u32::from(self.color_format.is_srgb()) | u32::from(headlight) << 1,
+                u32::from(srgb_out) | u32::from(headlight) << 1 | u32::from(hdr) << 2,
             ],
             near_far: [
                 near,
@@ -709,6 +774,7 @@ impl Renderer {
                 cull: settings.cull_back_faces && m.solid(),
                 wireframe: wireframe && m.topology() == Topology::Triangles && d.custom.is_none(),
                 program: d.custom.map(|(p, _)| p),
+                hdr,
             }
         };
         let visible = |d: &&DrawItem| {
@@ -735,7 +801,8 @@ impl Renderer {
         for (_, key) in &ordered {
             match key.program {
                 Some(p) => {
-                    let (format, samples) = (self.color_format, self.sample_count);
+                    let format = if hdr { HDR_FORMAT } else { self.color_format };
+                    let samples = self.sample_count;
                     let device = &self.device;
                     if self.programs[p]
                         .pipeline(device, primitive(key), key.blend, format, DEPTH_FORMAT, samples)
@@ -775,14 +842,18 @@ impl Renderer {
 
         // --- 3. record the render pass -------------------------------------
         let targets = self.targets.as_ref().expect("ensure_targets ran");
-        let clear = clear_color(&self.background, self.color_format.is_srgb());
+        let clear = clear_color(&self.background, srgb_out);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
             // With MSAA we draw into the multisampled texture and *resolve*
             // (average) it into the real target at the end of the pass.
-            let (view, resolve_target, store) = match &targets.msaa {
-                Some(msaa) => (msaa, Some(target), wgpu::StoreOp::Discard),
-                None => (target, None, wgpu::StoreOp::Store),
+            let (view, resolve_target, store) = match (&self.post, &targets.msaa) {
+                (Some(post), _) if hdr => match post.scene_targets() {
+                    (msaa, Some(resolve)) => (msaa, Some(resolve), wgpu::StoreOp::Discard),
+                    (view, None) => (view, None, wgpu::StoreOp::Store),
+                },
+                (_, Some(msaa)) => (msaa, Some(target), wgpu::StoreOp::Discard),
+                (_, None) => (target, None, wgpu::StoreOp::Store),
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -808,7 +879,8 @@ impl Renderer {
                     // A ComposedShader: its own pipeline layout and uniform block.
                     let program = &self.programs[p];
                     if current != Some(*key) {
-                        let Some(pipeline) = program.get(primitive(key), key.blend) else { continue };
+                        let format = if key.hdr { HDR_FORMAT } else { self.color_format };
+                        let Some(pipeline) = program.get(primitive(key), key.blend, format) else { continue };
                         pass.set_pipeline(pipeline);
                         current = Some(*key);
                         stats.pipeline_switches += 1;
@@ -854,6 +926,10 @@ impl Renderer {
                 stats.draw_calls += 1;
             }
         } // 🦀 the pass borrows the encoder; it must end (drop) before `finish`
+
+        if let Some(post) = self.post.as_ref().filter(|_| hdr) {
+            post.run(&self.queue, &mut encoder, target, settings);
+        }
 
         // --- 4. submit -----------------------------------------------------
         self.queue.submit([encoder.finish()]);

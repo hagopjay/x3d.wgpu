@@ -313,3 +313,34 @@ fn an_rgba_colour_node_makes_a_shape_blend() {
     assert!(close(blended, [128, 0, 128, 255], 3), "blended {blended:?}");
     assert!(close(opaque, [255, 0, 0, 255], 1), "opaque {opaque:?}");
 }
+
+#[test]
+fn aces_tone_mapping_follows_its_curve() {
+    let Some(gpu) = gpu() else { return };
+    let s = scene(
+        "<Shape><Appearance><UnlitMaterial emissiveColor='0.5 0.5 0.5'/></Appearance><Box size='3 3 3'/></Shape>",
+    );
+    let settings = RenderSettings { tone_map: x3d_render::ToneMap::Aces, ..Default::default() };
+    let c = center(&render_scene(&gpu, &s, &shot(settings)).unwrap());
+    // display 0.5 → linear 0.214 → ACES 0.3215 → display 0.603 → 154.
+    assert!(close(c, [154, 154, 154, 255], 3), "{c:?}");
+}
+
+#[test]
+fn bloom_spills_light_past_a_bright_edge() {
+    let Some(gpu) = gpu() else { return };
+    let s = scene(
+        "<Background skyColor='0 0 0'/>
+         <Shape><Appearance><UnlitMaterial emissiveColor='1 1 1'/></Appearance><Box size='0.6 0.6 0.6'/></Shape>",
+    );
+    let render = |bloom: f32| {
+        let settings = RenderSettings { bloom, ..Default::default() };
+        // MSAA on: the HDR path must resolve into its float texture too.
+        render_scene(&gpu, &s, &Shot { size: (64, 64), msaa: 4, settings, viewpoint: None }).unwrap()
+    };
+    let (plain, glowing) = (render(0.0), render(0.5));
+    let beside = |img: &RgbaImage| img.get_pixel(32, 12).0; // above the box, on the black background
+    assert_eq!(beside(&plain), [0, 0, 0, 255], "no bloom: black sky");
+    assert!(beside(&glowing)[0] > 10, "bloom: the box glows onto the sky {:?}", beside(&glowing));
+    assert!(close(center(&glowing), [255, 255, 255, 255], 1), "the box itself stays white");
+}

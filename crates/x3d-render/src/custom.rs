@@ -228,7 +228,7 @@ pub struct Program {
     pub block: Block,
     layout: wgpu::PipelineLayout,
     bind_layout: wgpu::BindGroupLayout,
-    pipelines: HashMap<(Primitive, bool), wgpu::RenderPipeline>,
+    pipelines: HashMap<(Primitive, bool, wgpu::TextureFormat), wgpu::RenderPipeline>,
     /// One block per draw, `stride` bytes apart.
     pub buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -309,21 +309,21 @@ impl Program {
         depth: wgpu::TextureFormat,
         samples: u32,
     ) -> Option<&wgpu::RenderPipeline> {
-        if !self.pipelines.contains_key(&(primitive, blend)) {
+        if !self.pipelines.contains_key(&(primitive, blend, format)) {
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let pipeline = self.create(device, primitive, blend, format, depth, samples);
             if let Some(e) = pollster::block_on(scope.pop()) {
                 log::warn!("{}: {e}", self.label);
                 return None;
             }
-            self.pipelines.insert((primitive, blend), pipeline);
+            self.pipelines.insert((primitive, blend, format), pipeline);
         }
-        self.pipelines.get(&(primitive, blend))
+        self.pipelines.get(&(primitive, blend, format))
     }
 
     /// A pipeline already built by [`Program::pipeline`].
-    pub fn get(&self, primitive: Primitive, blend: bool) -> Option<&wgpu::RenderPipeline> {
-        self.pipelines.get(&(primitive, blend))
+    pub fn get(&self, primitive: Primitive, blend: bool, format: wgpu::TextureFormat) -> Option<&wgpu::RenderPipeline> {
+        self.pipelines.get(&(primitive, blend, format))
     }
 
     fn create(
