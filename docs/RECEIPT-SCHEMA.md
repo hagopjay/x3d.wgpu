@@ -24,3 +24,5 @@
 ```
 
 Rules: `enabled:false` under `mode:Require` is a failure. `unexpected_errors` counts error ids not in `known_errors`. Anything format-specific (rows, validators, expected values) lives beside this block, never inside it.
+
+Two keys repeat a fact and are kept for older readers: `receipt` holds the same value as `schema` (the code wrote only `receipt` until 20 Nov 2026, while this page said `schema`), and `adapter` repeats `gpu` with the field names of `x3d-wgpu-conformance/1`. New readers use `schema` and `gpu`.

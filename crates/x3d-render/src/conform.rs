@@ -238,6 +238,9 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
     let all_vvl = validation::since(run_mark);
     let validation_failure = validation::check_required(&all_vvl).err();
     let json = json!({
+        // "schema" is the discriminator every Loom receipt shares (docs/RECEIPT-SCHEMA.md). "receipt" is the same
+        // value under the key this file wrote before 20 Nov 2026, kept so an older reader still finds it.
+        "schema": "x3d-wgpu-conformance/2",
         "receipt": "x3d-wgpu-conformance/2",
         "format": "x3d",
         "gpu": {"api": format!("{:?}", info.backend), "adapter": info.name, "backend": format!("{:?}", info.backend),
