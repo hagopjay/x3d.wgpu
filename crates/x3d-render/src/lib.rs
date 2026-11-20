@@ -34,6 +34,7 @@ pub mod shadows;
 pub mod textures;
 pub mod timing;
 pub mod uniforms;
+pub mod validation;
 // 🦀 Conditional compilation: this module only exists with the `window` feature.
 #[cfg(feature = "window")]
 pub mod viewer;

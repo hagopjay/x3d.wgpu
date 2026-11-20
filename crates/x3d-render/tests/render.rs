@@ -14,6 +14,7 @@ use x3d_render::{ColorMode, Gpu, RenderSettings, Renderer, Shot, render_scene};
 /// adapter is a *failure*, so the GPU tests can't pass by skipping.
 fn gpu() -> Option<Gpu> {
     static NAMED: std::sync::Once = std::sync::Once::new();
+    x3d_render::validation::install("warn");
     match Gpu::headless(x3d_render::Backend::Auto) {
         Ok(g) => {
             NAMED.call_once(|| eprintln!("GPU tests on: {}", g.describe()));
@@ -606,4 +607,13 @@ fn an_uncaptured_validation_error_is_logged_not_fatal() {
     let s = scene("<Shape><Appearance><UnlitMaterial emissiveColor='0 1 0'/></Appearance><Box size='3 3 3'/></Shape>");
     let img = render_scene(&gpu, &s, &shot(RenderSettings::default())).unwrap();
     assert!(close(center(&img), [0, 255, 0, 255], 1));
+}
+
+/// Runs last under `--test-threads=1` (libtest sorts by name): no Vulkan
+/// validation error may have been raised by any test in this binary.
+#[test]
+fn zz_vulkan_validation_stayed_clean() {
+    if gpu().is_some() {
+        x3d_render::validation::assert_clean("render tests");
+    }
 }

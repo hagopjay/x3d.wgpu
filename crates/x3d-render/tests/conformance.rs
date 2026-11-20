@@ -33,9 +33,7 @@ impl std::ops::Deref for TestGpu {
 }
 
 fn gpu(test: &str) -> Option<TestGpu> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("x3d_render=info"))
-        .is_test(true)
-        .try_init();
+    x3d_render::validation::install("x3d_render=info");
     let serial = GPU_TEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     eprintln!("conformance test={test}: creating device (exclusive fixture)");
     match Gpu::headless(x3d_render::Backend::Auto) {

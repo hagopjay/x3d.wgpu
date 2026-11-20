@@ -18,6 +18,7 @@ fn root() -> PathBuf {
 }
 
 fn gpu() -> Option<Gpu> {
+    x3d_render::validation::install("warn");
     match Gpu::headless(x3d_render::Backend::Auto) {
         Ok(g) => Some(g),
         Err(e) if std::env::var_os("X3D_REQUIRE_GPU").is_some() => {
@@ -114,6 +115,7 @@ fn sample_scenes_match_their_goldens() {
     std::fs::write(out.join("report.txt"), &report).unwrap();
     eprintln!("{report}");
     assert!(failed.is_empty(), "golden mismatches: {failed:?} (see target/golden/)");
+    x3d_render::validation::assert_clean("golden images");
 }
 
 #[test]

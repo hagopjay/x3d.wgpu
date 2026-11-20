@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::gpu::{Gpu, describe};
 use crate::headless::{Shot, render_scene};
 use crate::renderer::{Encode, RenderSettings};
+use crate::validation;
 
 #[derive(Debug, Clone)]
 pub struct RowResult {
@@ -41,11 +42,14 @@ pub struct RowResult {
 pub struct Receipt {
     pub json: Value,
     pub rows: Vec<RowResult>,
+    /// Why the Vulkan validation layer fails the run (`X3D_VVL=require`: missing
+    /// layer or any error), if it does.
+    pub validation_failure: Option<String>,
 }
 
 impl Receipt {
     pub fn passed(&self) -> bool {
-        self.rows.iter().all(|r| r.verdict == "pass" || r.verdict == "not run")
+        self.validation_failure.is_none() && self.rows.iter().all(|r| r.verdict == "pass" || r.verdict == "not run")
     }
 
     pub fn table(&self) -> String {
@@ -121,6 +125,7 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
         validator["tool"].as_str().unwrap_or("?"),
         validator["commit"].as_str().unwrap_or("?").get(..7).unwrap_or("?")
     );
+    let run_mark = validation::mark();
     let mut rows = Vec::new();
     let mut json_rows = Vec::new();
     for row in expected["rows"].as_array().map(Vec::as_slice).unwrap_or_default() {
@@ -150,6 +155,8 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             detail = format!("{validator_name}: {validation}");
         }
         let mut got_gamma22 = None;
+        let mut row_vvl = json!({"errors": 0, "warnings": 0, "message_ids": []});
+        let row_mark = validation::mark();
         let (got, delta) = if verdict.is_empty() {
             log::info!("conformance row={id} scene={} source={source}: loading", scene_path.display());
             let scene = x3d_scene::load(&scene_path)?;
@@ -171,6 +178,13 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             log::info!("conformance row={id}: render complete");
             let delta = (0..3).map(|c| got[c].abs_diff(exp[c])).max().unwrap_or(0);
             verdict = if delta <= max_delta { "pass" } else { "fail" }.into();
+            // Vulkan validation: any layer *error* during this row fails it.
+            let vvl = validation::since(row_mark);
+            row_vvl = validation::row_block(&vvl);
+            if validation::enabled() && validation::counts(&vvl).unexpected_errors > 0 {
+                detail = format!("Vulkan validation: {}", validation::message_ids(&vvl).join(", "));
+                verdict = "vvl error".into();
+            }
             (Some(got), Some(delta))
         } else {
             (None, None)
@@ -181,6 +195,7 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
             "got": got, "got_gamma22": got_gamma22, "got_from": describe(&gpu.adapter.get_info()),
             "abs_delta_max": delta, "max_delta": max_delta, "why_tolerance": row["why_tolerance"],
             "validated_by": {"validator": validator, "verdict": validation},
+            "api_validation": row_vvl,
             "verdict": verdict, "detail": detail,
         }));
         rows.push(RowResult {
@@ -220,8 +235,15 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
     }
     let info = gpu.adapter.get_info();
     let count = |v: &str| rows.iter().filter(|r| r.verdict == v).count();
+    let all_vvl = validation::since(run_mark);
+    let validation_failure = validation::check_required(&all_vvl).err();
     let json = json!({
-        "receipt": "x3d-wgpu-conformance/1",
+        "receipt": "x3d-wgpu-conformance/2",
+        "format": "x3d",
+        "gpu": {"api": format!("{:?}", info.backend), "adapter": info.name, "backend": format!("{:?}", info.backend),
+                "device_type": format!("{:?}", info.device_type), "driver": info.driver, "driver_info": info.driver_info},
+        "api_validation": validation::receipt_block(&all_vvl),
+        "api_validation_failure": validation_failure,
         "renderer": {"tool": "x3d-view", "version": env!("CARGO_PKG_VERSION")},
         "adapter": {"name": info.name, "backend": format!("{:?}", info.backend), "device_type": format!("{:?}", info.device_type),
                     "driver": info.driver, "driver_info": info.driver_info},
@@ -230,5 +252,5 @@ pub fn run(gpu: &Gpu, root: &Path, dir: &Path) -> anyhow::Result<Receipt> {
                     "blocked": rows.len() - count("pass") - count("fail") - count("not run")},
         "rows": json_rows,
     });
-    Ok(Receipt { json, rows })
+    Ok(Receipt { json, rows, validation_failure })
 }

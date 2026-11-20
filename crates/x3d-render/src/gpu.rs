@@ -75,6 +75,11 @@ pub struct Gpu {
 pub fn make_instance(backend: Backend) -> wgpu::Instance {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     desc.backends = backend.to_wgpu();
+    // 🎨 X3D_VVL=1|require asks for the Vulkan validation layer (see `validation`).
+    if crate::validation::mode() != crate::validation::Mode::Default {
+        desc.flags |= wgpu::InstanceFlags::VALIDATION;
+    }
+    crate::validation::note_instance(desc.flags.with_env().contains(wgpu::InstanceFlags::VALIDATION));
     wgpu::Instance::new(desc)
 }
 
