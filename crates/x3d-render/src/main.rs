@@ -235,7 +235,7 @@ impl FromStr for Size {
 
 fn main() -> Result<()> {
     // RUST_LOG=info (or debug, or wgpu_core=warn,x3d_render=debug) for more detail.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    x3d_render::validation::install("warn");
     let cli = Cli::parse();
     match cli.command {
         #[cfg(feature = "window")]
@@ -260,9 +260,17 @@ fn main() -> Result<()> {
             println!("adapter: {}\nvalidator: {}\n", gpu.describe(), r.json["validator"]);
             print!("{}", r.table());
             println!("\n{}", r.json["summary"]);
+            let v = &r.json["api_validation"];
+            println!(
+                "Vulkan validation: layer {} version {} enabled {} errors {} warnings {}",
+                v["layer"], v["layer_version"], v["enabled"], v["errors"], v["warnings"]
+            );
             if let Some(path) = receipt {
                 std::fs::write(&path, serde_json::to_string_pretty(&r.json)?)?;
                 println!("receipt: {}", path.display());
+            }
+            if let Some(why) = &r.validation_failure {
+                bail!("conformance failed: {why}");
             }
             if !r.passed() {
                 bail!("conformance failed");

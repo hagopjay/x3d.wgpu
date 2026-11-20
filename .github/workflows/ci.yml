@@ -17,6 +17,10 @@ jobs:
   # Software Vulkan (lavapipe) on a stock runner: every GPU test really runs.
   lavapipe:
     runs-on: ubuntu-latest
+    env:
+      # Vulkan Validation Layer is mandatory: a missing layer or any
+      # unexpected VVL error fails the job (docs/VVL.md).
+      X3D_VVL: require
     defaults:
       run:
         shell: bash
@@ -26,7 +30,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools gdb ripgrep
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools vulkan-validationlayers gdb ripgrep
       - name: Select the software Vulkan ICD explicitly
         run: |
           lvp_icd=$(rg --files /usr/share/vulkan/icd.d | rg '/lvp_icd[^/]*\.json$' | head -n 1)
@@ -80,8 +84,10 @@ jobs:
           set -o pipefail
           cargo test -p x3d-render --test golden --test conformance -- --nocapture --test-threads=1 2>&1 | tee golden-conformance.txt
       - run: cargo build -p x3d-render --no-default-features   # headless-only build
-      - name: Conformance receipt
-        run: cargo run -q --release -- conform conformance --backend vulkan --receipt receipt.json
+      - name: Conformance receipt (with Vulkan validation results)
+        run: |
+          cargo run -q --release -- conform conformance --backend vulkan --receipt receipt.json
+          python3 -c 'import json; v=json.load(open("receipt.json"))["api_validation"]; print(json.dumps(v, indent=1)); assert v["enabled"] and v["unexpected_errors"]==0, v'
       - name: Frame-time table
         run: |
           for c in cpu gpu; do
@@ -141,6 +147,8 @@ jobs:
   gpu:
     if: vars.X3D_GPU_RUNNER == 'true'
     runs-on: [self-hosted, gpu]
+    env:
+      X3D_VVL: require
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
