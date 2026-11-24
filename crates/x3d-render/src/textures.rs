@@ -43,6 +43,8 @@ pub struct TextureCache {
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// For a base texture that asks for sharp texels (PixelTexture): nearest when magnified.
+    sampler_nearest: wgpu::Sampler,
     /// Bound to every unused slot: shaders can sample all five unconditionally.
     white: Arc<GpuTexture>,
     /// 🦀 `Option` remembers failures too, so a missing file warns once.
@@ -84,12 +86,23 @@ impl TextureCache {
             anisotropy_clamp: 16, // needs all three filters Linear
             ..Default::default()
         });
+        let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material sampler (nearest)"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let white = Arc::new(upload(device, queue, image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4])), "white"));
         Self {
             device: device.clone(),
             queue: queue.clone(),
             layout,
             sampler,
+            sampler_nearest,
             white,
             images: HashMap::new(),
             sets: HashMap::new(),
@@ -137,7 +150,12 @@ impl TextureCache {
                 resource: wgpu::BindingResource::TextureView(&t.view),
             })
             .collect();
-        entries.push(wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) });
+        entries.push(wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(if textures.base.as_ref().is_some_and(|t| t.nearest) {
+                &self.sampler_nearest
+            } else {
+                &self.sampler
+            }),
+        });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material textures"),
             layout: &self.layout,

@@ -336,6 +336,8 @@ pub struct Renderer {
     env_view: wgpu::TextureView,
     env_sampler: wgpu::Sampler,
     env: Option<crate::environment::Prepared>,
+    /// Fog as the shader reads it: [type, range, 0, 0] and its colour.
+    fog: ([f32; 4], [f32; 4]),
     /// The scene's world bounds: what the sun's shadow map has to cover.
     bounds: Aabb,
     /// What this GPU can afford (from `Gpu::budget`).
@@ -503,6 +505,7 @@ impl Renderer {
             env_view,
             env_sampler,
             env: None,
+            fog: ([0.0; 4], [0.0; 4]),
             bounds: Aabb::EMPTY,
             budget,
             cache,
@@ -683,6 +686,9 @@ impl Renderer {
         self.lights.clone_from(&scene.lights);
         self.switches.clone_from(&scene.switches);
         self.background = scene.background.clone();
+        self.fog = scene.fog.map_or(([0.0; 4], [0.0; 4]), |f| {
+            ([if f.exponential { 2.0 } else { 1.0 }, f.visibility_range, 0.0, 0.0], f.color.extend(1.0).to_array())
+        });
         self.scene_headlight = scene.headlight;
         log::info!(
             "uploaded {} meshes, {} draws, {} materials ({} KiB of vertices, {} KiB of textures)",
@@ -972,6 +978,8 @@ impl Renderer {
             env_color: self.env.as_ref().map_or([0.0; 4], |e| e.color_intensity.extend(1.0).to_array()),
             env_rotation: self.env.as_ref().map_or(glam::Mat4::IDENTITY, |e| e.rotation).to_cols_array_2d(),
             env_sh: self.env.as_ref().map_or([[0.0; 4]; 9], |e| e.sh.map(|c| c.extend(0.0).to_array())),
+            fog: self.fog.0,
+            fog_color: self.fog.1,
             lights: [bytemuck::Zeroable::zeroed(); MAX_LIGHTS],
         };
         for (slot, light) in frame.lights.iter_mut().zip(&lights) {

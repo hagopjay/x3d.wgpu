@@ -20,7 +20,7 @@
 //! | Geometry | Box, Sphere, Cylinder, Cone, IndexedFaceSet, (Indexed)TriangleSet/FanSet/StripSet, (Indexed)QuadSet, ElevationGrid, IndexedLineSet, LineSet, PointSet |
 //! | Appearance | Material, UnlitMaterial, TwoSidedMaterial (front), PhysicalMaterial (approximated) |
 //! | Per-vertex | Coordinate, Color, ColorRGBA, Normal, creaseAngle, ccw, solid |
-//! | Environment | DirectionalLight, PointLight, SpotLight, Viewpoint, NavigationInfo.headlight, Background (zenith) |
+//! | Environment | DirectionalLight, PointLight, SpotLight, Viewpoint, NavigationInfo.headlight, Background (zenith), Fog |
 //! | Reuse | DEF / USE (shared geometry is built once) |
 //!
 //! Everything else is counted in [`Report`], never silently dropped.
@@ -39,6 +39,6 @@ pub use error::{Error, Result};
 pub use parse::{LoadOptions, load, load_with, parse_str, parse_str_with};
 pub use report::{Report, Stats};
 pub use scene::{
-    Aabb, Background, CubeMap, Draw, Environment, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
+    Aabb, Background, CubeMap, Draw, Environment, Fog, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
     SwitchGuard, TextureRef, Textures, Topology, Vertex, Viewpoint,
 };

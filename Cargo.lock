@@ -3107,6 +3107,7 @@ dependencies = [
  "bytemuck",
  "flate2",
  "glam",
+ "image",
  "log",
  "proptest",
  "roxmltree",

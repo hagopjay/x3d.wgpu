@@ -182,6 +182,8 @@ pub struct TextureRef {
     pub repeat_t: bool,
     /// Decoded `data:` url bytes (PNG/JPEG), when the image is inline.
     pub inline: Option<std::sync::Arc<[u8]>>,
+    /// Sample with the nearest texel when magnified (a `PixelTexture`: X_ITE draws its pixels as sharp blocks).
+    pub nearest: bool,
 }
 
 /// Six images, one per cube face (X3D `ComposedCubeMapTexture`), in the
@@ -536,6 +538,15 @@ impl Viewpoint {
     }
 }
 
+/// The first `<Fog>`: blends what is drawn toward `color` with the distance from the camera
+/// (19775-1 section 24.2.1: LINEAR `(range - d) / range`, EXPONENTIAL `exp(-d / (range - d))`, both from the eye).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fog {
+    pub color: Vec3,
+    pub exponential: bool,
+    pub visibility_range: f32,
+}
+
 /// The first `<Background>`: sky colours from the zenith down.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Background {
@@ -573,6 +584,8 @@ pub struct Scene {
     pub lights: Vec<Light>,
     pub viewpoints: Vec<Viewpoint>,
     pub background: Background,
+    /// The first `Fog` with a visibilityRange above 0.
+    pub fog: Option<Fog>,
     /// The first `EnvironmentLight` (image-based lighting), if any.
     pub environment: Option<Environment>,
     /// NavigationInfo `headlight` (true unless a scene turns it off).

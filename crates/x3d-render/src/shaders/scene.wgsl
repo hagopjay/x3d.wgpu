@@ -40,6 +40,8 @@ struct Frame {
     env_color: vec4f,           // color × intensity
     env_rotation: mat4x4f,      // world → environment
     env_sh: array<vec4f, 9>,    // irradiance SH (cosine-convolved)
+    fog: vec4f,                 // x = 0 none, 1 linear, 2 exponential; y = visibilityRange
+    fog_color: vec4f,
     lights: array<Light, 16>,
 }
 
@@ -533,6 +535,14 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f 
             rgb = shade_classic(in.world_pos, n, base, emissive, specular, false);
         }
         base_shown = select(base, emissive, unlit);
+    }
+
+    // Fog (19775-1 24.2.1): toward the fog colour with the distance from the eye.
+    if frame.fog.x > 0.5 {
+        let d = length(in.world_pos - frame.camera_pos.xyz);
+        var f = clamp((frame.fog.y - d) / frame.fog.y, 0.0, 1.0);
+        if frame.fog.x > 1.5 { f = select(exp(-d / (frame.fog.y - d)), 0.0, d >= frame.fog.y); }
+        rgb = mix(frame.fog_color.rgb, rgb, f);
     }
 
     switch frame.params.y {

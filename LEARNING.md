@@ -130,3 +130,9 @@ know you're done. They're independent; pick what looks fun.
 - **Winding**: the order of a triangle's corners on screen; CCW = front face here (X3D `ccw='true'`).
 - **Normal matrix**: the inverse-transpose of the model matrix; keeps normals perpendicular under non-uniform scale.
 - **Crease angle**: X3D's threshold below which neighbouring faces share a smooth normal.
+
+## Found by the cross-engine render oracle (24 Nov 2026)
+Six engines render the same scenes in x3d.loom/x3d.render-oracle. It showed three things this renderer lacked, now fixed:
+- **Fog.** `<Fog>` was ignored (`lit_fog_linear` 70.5 from X_ITE, now 0.7). The shader mixes toward the fog colour by the distance from the eye: LINEAR `(range - d) / range`, EXPONENTIAL `exp(-d / (range - d))`.
+- **PixelTexture.** It was reported unsupported (`lit_texture_pixel` 82.8, now 0.5). The SFImage becomes an in-memory PNG; it is sampled with the nearest texel when magnified, because X_ITE draws it as sharp blocks.
+- **Box texture coordinates.** Each face took an arbitrary in-plane axis pair, so a picture came out rotated on some faces. Now s runs to the viewer's right and t up on every side face, the top has -Z up and the bottom +Z.

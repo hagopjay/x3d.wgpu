@@ -11,6 +11,7 @@ glam = { workspace = true }
 roxmltree = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+image = { workspace = true }
 # 🦀 Optional dependency = Cargo feature. `.x3dz` (gzipped X3D) support only
 # compiles when the `gzip` feature is on (it is by default).
 flate2 = { workspace = true, optional = true }

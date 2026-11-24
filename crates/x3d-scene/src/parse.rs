@@ -24,7 +24,7 @@ use crate::runtime::{
     AnimNode, Behaviour, KeyValues, Local, Route, Target, TextureTransform2D, TransformNode, Trs, Value, field_name,
 };
 use crate::scene::{
-    Background, CubeMap, Draw, Environment, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
+    Background, CubeMap, Draw, Environment, Fog, Light, LightKind, LodTag, Material, Mesh, Pbr, Scene, ShaderSource,
     SwitchGuard, TextureRef, Textures, Topology, Viewpoint,
 };
 
@@ -249,6 +249,7 @@ struct Loader<'a, 'i> {
     meshes: HashMap<NodeId, Option<Arc<Mesh>>>,
     seen_navigation: bool,
     seen_background: bool,
+    seen_fog: bool,
     /// The LOD levels we are inside right now.
     lod: Vec<LodTag>,
     /// The light scopes we are inside right now.
@@ -289,6 +290,7 @@ impl<'a, 'i> Loader<'a, 'i> {
             meshes: HashMap::new(),
             seen_navigation: false,
             seen_background: false,
+            seen_fog: false,
             lod: Vec::new(),
             scopes: Vec::new(),
             node_stack: vec![0],
@@ -435,6 +437,7 @@ impl<'a, 'i> Loader<'a, 'i> {
                 Ok(())
             }
             "Background" => self.background(n),
+            "Fog" => self.fog(n),
             "Inline" => self.inline(n, world),
             // TimeSensors, interpolators… are wired up from the ROUTEs at the end.
             _ if is_behaviour(name) => Ok(()),
@@ -992,8 +995,11 @@ impl<'a, 'i> Loader<'a, 'i> {
 
     /// An ImageTexture → a file on disk.
     fn texture(&mut self, el: Node<'a, 'i>) -> Result<Option<TextureRef>> {
+        if el.has_tag_name("PixelTexture") {
+            return self.pixel_texture(el);
+        }
         if !el.has_tag_name("ImageTexture") {
-            self.scene.report.unsupported(&format!("{} (only ImageTexture so far)", el.name()));
+            self.scene.report.unsupported(&format!("{} (only ImageTexture and PixelTexture so far)", el.name()));
             return Ok(None);
         }
         let urls: Vec<String> = el.field_or("url", Vec::new())?;
@@ -1007,6 +1013,7 @@ impl<'a, 'i> Loader<'a, 'i> {
                 repeat_s: el.field_or("repeatS", true)?,
                 repeat_t: el.field_or("repeatT", true)?,
                 inline: Some(bytes.into()),
+                nearest: false,
             }));
         }
         let Some(dir) = self.dir else {
@@ -1027,6 +1034,60 @@ impl<'a, 'i> Loader<'a, 'i> {
             repeat_s: el.field_or("repeatS", true)?,
             repeat_t: el.field_or("repeatT", true)?,
             inline: None,
+            nearest: false,
+        }))
+    }
+
+    /// `PixelTexture`: `image="width height components pixel…"`, one integer per pixel (hex allowed):
+    /// 1 = grey, 2 = grey + alpha, 3 = RGB, 4 = RGBA, the first byte the highest (19775-1 section 18.4.5, SFImage).
+    /// The pixels run from the bottom-left of the picture, up. Drawn as sharp blocks, as X_ITE does.
+    fn pixel_texture(&mut self, el: Node<'a, 'i>) -> Result<Option<TextureRef>> {
+        let raw: String = el.attribute("image").unwrap_or("").to_owned();
+        let toks: Vec<&str> = raw.split(|c: char| c.is_ascii_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
+        let num = |t: &str| -> Option<u32> {
+            match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                Some(h) => u32::from_str_radix(h, 16).ok(),
+                None => t.parse::<u32>().ok(),
+            }
+        };
+        let head: Vec<u32> = toks.iter().take(3).filter_map(|t| num(t)).collect();
+        if head.len() < 3 || head[0] == 0 || head[1] == 0 || head[2] == 0 || head[2] > 4 {
+            if !toks.is_empty() {
+                self.scene.report.warn(format!("{}: PixelTexture image field is not 'width height components pixels…'", el.label()));
+            }
+            return Ok(None);
+        }
+        let (w, h, comps) = (head[0], head[1], head[2]);
+        let px: Vec<u32> = toks[3..].iter().filter_map(|t| num(t)).collect();
+        if (px.len() as u64) < u64::from(w) * u64::from(h) {
+            self.scene.report.warn(format!("{}: PixelTexture has {} of {} pixels", el.label(), px.len(), u64::from(w) * u64::from(h)));
+            return Ok(None);
+        }
+        let mut img = image::RgbaImage::new(w, h);
+        for (i, v) in px.iter().take((w * h) as usize).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let b = |k: u32| ((v >> (8 * k)) & 0xff) as u8;
+            let rgba = match comps {
+                1 => [b(0), b(0), b(0), 255],
+                2 => [b(1), b(1), b(1), b(0)],
+                3 => [b(2), b(1), b(0), 255],
+                _ => [b(3), b(2), b(1), b(0)],
+            };
+            img.put_pixel(x, h - 1 - y, image::Rgba(rgba)); // SFImage rows start at the bottom of the picture; the file's first row is its top
+        }
+        let mut bytes = Vec::new();
+        if img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).is_err() {
+            return Ok(None);
+        }
+        use std::hash::{Hash, Hasher};
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hs);
+        Ok(Some(TextureRef {
+            path: PathBuf::from(format!("pixel:{:016x}", hs.finish())),
+            repeat_s: el.field_or("repeatS", true)?,
+            repeat_t: el.field_or("repeatT", true)?,
+            inline: Some(bytes.into()),
+            nearest: true,
         }))
     }
 
@@ -1248,6 +1309,26 @@ impl<'a, 'i> Loader<'a, 'i> {
             field_of_view: n.field_or("fieldOfView", d.field_of_view)?,
             center_of_rotation: world.transform_point3(n.field_or("centerOfRotation", Vec3::ZERO)?),
         });
+        Ok(())
+    }
+
+    /// The first `Fog` (a visibilityRange of 0 turns fog off, 19775-1 section 24.2.1).
+    fn fog(&mut self, n: Node<'a, 'i>) -> Result<()> {
+        if std::mem::replace(&mut self.seen_fog, true) {
+            return Ok(());
+        }
+        let range: f32 = n.field_or("visibilityRange", 0.0)?;
+        if range > 0.0 {
+            let kind: String = n.attribute("fogType").unwrap_or("LINEAR").trim().trim_matches('"').to_owned();
+            self.scene.fog = Some(Fog {
+                color: n.field_or("color", Vec3::ONE)?,
+                exponential: kind.eq_ignore_ascii_case("EXPONENTIAL") || kind.eq_ignore_ascii_case("EXPONENTIAL2"),
+                visibility_range: range,
+            });
+            if kind.eq_ignore_ascii_case("EXPONENTIAL2") {
+                self.scene.report.approximated("Fog EXPONENTIAL2 (drawn as EXPONENTIAL)");
+            }
+        }
         Ok(())
     }
 
