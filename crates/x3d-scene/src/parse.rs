@@ -1043,7 +1043,8 @@ impl<'a, 'i> Loader<'a, 'i> {
     /// The pixels run from the bottom-left of the picture, up. Drawn as sharp blocks, as X_ITE does.
     fn pixel_texture(&mut self, el: Node<'a, 'i>) -> Result<Option<TextureRef>> {
         let raw: String = el.attribute("image").unwrap_or("").to_owned();
-        let toks: Vec<&str> = raw.split(|c: char| c.is_ascii_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
+        let toks: Vec<&str> =
+            raw.split(|c: char| c.is_ascii_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
         let num = |t: &str| -> Option<u32> {
             match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
                 Some(h) => u32::from_str_radix(h, 16).ok(),
@@ -1053,14 +1054,21 @@ impl<'a, 'i> Loader<'a, 'i> {
         let head: Vec<u32> = toks.iter().take(3).filter_map(|t| num(t)).collect();
         if head.len() < 3 || head[0] == 0 || head[1] == 0 || head[2] == 0 || head[2] > 4 {
             if !toks.is_empty() {
-                self.scene.report.warn(format!("{}: PixelTexture image field is not 'width height components pixels…'", el.label()));
+                self.scene
+                    .report
+                    .warn(format!("{}: PixelTexture image field is not 'width height components pixels…'", el.label()));
             }
             return Ok(None);
         }
         let (w, h, comps) = (head[0], head[1], head[2]);
         let px: Vec<u32> = toks[3..].iter().filter_map(|t| num(t)).collect();
         if (px.len() as u64) < u64::from(w) * u64::from(h) {
-            self.scene.report.warn(format!("{}: PixelTexture has {} of {} pixels", el.label(), px.len(), u64::from(w) * u64::from(h)));
+            self.scene.report.warn(format!(
+                "{}: PixelTexture has {} of {} pixels",
+                el.label(),
+                px.len(),
+                u64::from(w) * u64::from(h)
+            ));
             return Ok(None);
         }
         let mut img = image::RgbaImage::new(w, h);

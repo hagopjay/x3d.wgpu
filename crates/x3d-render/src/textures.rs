@@ -150,7 +150,9 @@ impl TextureCache {
                 resource: wgpu::BindingResource::TextureView(&t.view),
             })
             .collect();
-        entries.push(wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(if textures.base.as_ref().is_some_and(|t| t.nearest) {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: wgpu::BindingResource::Sampler(if textures.base.as_ref().is_some_and(|t| t.nearest) {
                 &self.sampler_nearest
             } else {
                 &self.sampler
