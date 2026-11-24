@@ -90,11 +90,14 @@ pub struct FrameUniform {
     pub env_rotation: [[f32; 4]; 4],
     /// Irradiance as 9 SH coefficients (rgb), cosine-convolved: E(n) = Σ cᵢ Yᵢ(n).
     pub env_sh: [[f32; 4]; 9],
+    /// Fog: x = 0 none, 1 linear, 2 exponential; y = visibilityRange.
+    pub fog: [f32; 4],
+    pub fog_color: [f32; 4],
     pub lights: [GpuLight; MAX_LIGHTS],
 }
 const _: () = assert!(
     size_of::<FrameUniform>()
-        == 64 + 64 + 16 * 4 + 16 * 4 + 64 * MAX_SHADOW_MATS + 16 * 2 + 64 + 16 * 9 + 80 * MAX_LIGHTS
+        == 64 + 64 + 16 * 4 + 16 * 4 + 64 * MAX_SHADOW_MATS + 16 * 2 + 64 + 16 * 9 + 16 * 2 + 80 * MAX_LIGHTS
 );
 
 /// Per-draw data: matrices + material. Bound at group 1 with a dynamic offset.

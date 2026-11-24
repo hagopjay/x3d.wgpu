@@ -341,10 +341,16 @@ impl Builder {
 pub fn cuboid(size: Vec3) -> Mesh {
     let h = size * 0.5;
     let mut b = Builder::default();
-    // Each face: its normal and two in-plane axes.
-    for n in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
-        let u = n.any_orthonormal_vector();
-        let v = n.cross(u);
+    // Each face: its normal and the two in-plane axes, chosen so a texture reads upright seen from
+    // outside (s to the viewer's right, t up; the top face has -Z up, the bottom +Z), u x v = normal.
+    for (n, u, v) in [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ] {
         let c = n * h;
         let corner = |su: f32, sv: f32| c + (u * su + v * sv) * h;
         let i = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
