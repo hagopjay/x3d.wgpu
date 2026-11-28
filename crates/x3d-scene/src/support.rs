@@ -104,9 +104,19 @@ const APPROXIMATED: &[&str] =
 const SILENT: &[&str] =
     &["WorldInfo", "ProtoDeclare", "ExternProtoDeclare", "IMPORT", "EXPORT", "IS", "connect", "field", "fieldValue"];
 
-/// Drawn only when wired up: BooleanToggle and PositionInterpolator2D need a
-/// ROUTE; ComposedCubeMapTexture is read only by an EnvironmentLight.
-const CONDITIONAL: &[&str] = &["BooleanToggle", "PositionInterpolator2D", "ComposedCubeMapTexture"];
+/// Conditional: BooleanToggle and PositionInterpolator2D need a ROUTE;
+/// ComposedCubeMapTexture is read only by an EnvironmentLight; and these three
+/// are approximated only in some cases, so the report says so only then:
+/// MultiTextureCoordinate (when there is a second set), TextureCoordinateGenerator
+/// (when the mode is not COORD), TwoSidedMaterial (when the back colours differ).
+const CONDITIONAL: &[&str] = &[
+    "BooleanToggle",
+    "PositionInterpolator2D",
+    "ComposedCubeMapTexture",
+    "MultiTextureCoordinate",
+    "TextureCoordinateGenerator",
+    "TwoSidedMaterial",
+];
 
 pub fn static_support(name: &str) -> Support {
     if CONDITIONAL.contains(&name) {
