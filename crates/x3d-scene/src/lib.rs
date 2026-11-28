@@ -33,6 +33,7 @@ mod parse;
 pub mod report;
 pub mod runtime;
 pub mod scene;
+pub mod support;
 
 // 🦀 Re-exports: users write `x3d_scene::Scene`, not `x3d_scene::scene::Scene`.
 pub use error::{Error, Result};
