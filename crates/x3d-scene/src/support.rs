@@ -13,6 +13,9 @@ pub enum Support {
     Silent,
     /// Counted in the loss report, not drawn.
     Skipped,
+    /// Works only in a particular setting; a lone node of this kind is
+    /// reported as skipped (seen by the 260-node audit, 28 Nov).
+    Conditional,
 }
 
 impl Support {
@@ -22,6 +25,7 @@ impl Support {
             Support::Approximated => "approximated",
             Support::Silent => "silent",
             Support::Skipped => "skipped",
+            Support::Conditional => "conditional",
         }
     }
 }
@@ -100,8 +104,14 @@ const APPROXIMATED: &[&str] =
 const SILENT: &[&str] =
     &["WorldInfo", "ProtoDeclare", "ExternProtoDeclare", "IMPORT", "EXPORT", "IS", "connect", "field", "fieldValue"];
 
+/// Drawn only when wired up: BooleanToggle and PositionInterpolator2D need a
+/// ROUTE; ComposedCubeMapTexture is read only by an EnvironmentLight.
+const CONDITIONAL: &[&str] = &["BooleanToggle", "PositionInterpolator2D", "ComposedCubeMapTexture"];
+
 pub fn static_support(name: &str) -> Support {
-    if DRAWN.contains(&name)
+    if CONDITIONAL.contains(&name) {
+        Support::Conditional
+    } else if DRAWN.contains(&name)
         || name.starts_with("CAD") && matches!(name, "CADAssembly" | "CADLayer" | "CADPart" | "CADFace")
     {
         Support::Drawn
