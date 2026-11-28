@@ -448,7 +448,7 @@ fn main() -> Result<()> {
             }
             let out = serde_json::json!({
                 "schema": "x3d-wgpu-coverage/1", "format": "x3d", "renderer": "x3d.wgpu",
-                "gpu": gpu.as_ref().map(|g| g.describe()),
+                "gpu": gpu.as_ref().map(x3d_render::Gpu::describe),
                 "static_tally": tally, "nodes": rows,
                 "api_validation": x3d_render::validation::receipt_block(&x3d_render::validation::since(0)),
             });
