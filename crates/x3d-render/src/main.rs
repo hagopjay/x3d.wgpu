@@ -440,13 +440,13 @@ fn main() -> Result<()> {
                         // Agreement between the source's claim and what loading reported.
                         // A static "skipped" that loads with no loss-report entry is a
                         // silent drop: the loader did not count it.
-                        row["agree"] = match (row["static"].as_str(), row["observed"].as_str()) {
-                            (Some("drawn" | "silent"), Some("loaded")) => true,
-                            (Some("approximated"), Some("approximated")) => true,
-                            (Some("skipped"), Some("skipped" | "ignored")) => true,
-                            (Some("conditional"), _) => true,
-                            _ => false,
-                        }
+                        row["agree"] = matches!(
+                            (row["static"].as_str(), row["observed"].as_str()),
+                            (Some("drawn" | "silent"), Some("loaded"))
+                                | (Some("approximated"), Some("approximated"))
+                                | (Some("skipped"), Some("skipped" | "ignored"))
+                                | (Some("conditional"), _)
+                        )
                         .into();
                         row["vvl"] = x3d_render::validation::row_block(&x3d_render::validation::since(mark));
                     }
