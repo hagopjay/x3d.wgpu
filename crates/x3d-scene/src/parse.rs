@@ -141,6 +141,7 @@ fn parse_inner(xml: &str, opts: &LoadOptions, dir: Option<&Path>, state: &mut In
     let mut loader = Loader::new(&doc, opts, dir, state);
     loader.children(scene_el, Mat4::IDENTITY, 0)?;
     loader.wire_routes(&doc);
+    loader.count_silent_drops(scene_el);
     Ok(loader.finish())
 }
 
@@ -1368,6 +1369,43 @@ impl<'a, 'i> Loader<'a, 'i> {
 
     /// Turn every ROUTE into an edge of the event graph. Routes whose ends
     /// we can't animate are counted in the report.
+    /// The loss report's promise is "counted, never silently dropped". Nodes
+    /// the loader never looks at (children of an Appearance or a geometry,
+    /// sensors it has no use for, volume styles...) used to vanish without a
+    /// word; the 260-node audit found 98 of them. Any element that the support
+    /// table calls skipped, and that nothing above has reported by name, is
+    /// counted here: behaviour-like nodes under "ignored" (a still is drawn),
+    /// the rest under "unsupported".
+    fn count_silent_drops(&mut self, scene_el: Node<'_, '_>) {
+        use crate::support::{Support, static_support};
+        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for e in scene_el.descendants().filter(|n| n.is_element() && !std::ptr::eq(n, &scene_el)) {
+            let name = e.name();
+            if name == "Scene" || !name.starts_with(|c: char| c.is_ascii_uppercase()) || name.starts_with("Proto") {
+                continue;
+            }
+            if static_support(name) == Support::Skipped {
+                *seen.entry(name.to_owned()).or_default() += 1;
+            }
+        }
+        let r = &mut self.scene.report;
+        for (name, count) in seen {
+            let reported = |m: &std::collections::BTreeMap<String, usize>| {
+                m.keys().any(|k| k == &name || k.starts_with(&format!("{name} ")))
+            };
+            if reported(&r.unsupported) || reported(&r.approximated) || reported(&r.ignored) {
+                continue;
+            }
+            for _ in 0..count {
+                if is_behaviour(&name) {
+                    r.ignored(&format!("{name} (not run: this renderer draws a still)"));
+                } else {
+                    r.unsupported(&name);
+                }
+            }
+        }
+    }
+
     fn wire_routes(&mut self, doc: &'a Document<'i>) {
         let inside_proto = |n: &Node| n.ancestors().any(|a| a.has_tag_name("ProtoDeclare"));
         for r in doc.descendants().filter(|n| n.has_tag_name("ROUTE") && !inside_proto(n)) {

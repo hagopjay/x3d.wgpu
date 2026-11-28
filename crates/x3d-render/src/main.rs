@@ -88,6 +88,24 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Backend::Auto)]
         backend: Backend,
     },
+    /// Per-node coverage for the multi-renderer audit: what the loader says
+    /// about each node name, and (with --scenes) what loading and rendering
+    /// `<scenes>/<Node>.x3d` really did, with the Vulkan validation result.
+    Coverage {
+        /// A JSON object whose keys are node names (values may carry `comp`).
+        nodes: PathBuf,
+        /// A folder of one minimal scene per node, named `<Node>.x3d`.
+        #[arg(long)]
+        scenes: Option<PathBuf>,
+        /// Write each node's PNG here (needs --scenes).
+        #[arg(long)]
+        png_dir: Option<PathBuf>,
+        /// Write the JSON table here (default: stdout).
+        #[arg(long)]
+        json: Option<PathBuf>,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Print what the loader kept, approximated and skipped.
     Info {
         file: PathBuf,
@@ -349,6 +367,107 @@ fn main() -> Result<()> {
                 t_load.as_secs_f64() * 1e3,
                 t_render.as_secs_f64() * 1e3
             );
+            Ok(())
+        }
+        Command::Coverage { nodes, scenes, png_dir, json, common } => {
+            let list: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&nodes)?)?;
+            let map = list.as_object().context("nodes file must be a JSON object keyed by node name")?;
+            let gpu = if scenes.is_some() { Some(Gpu::headless_with(common.backend, common.profile)?) } else { None };
+            if let Some(d) = &png_dir {
+                std::fs::create_dir_all(d)?;
+            }
+            let mut rows = Vec::new();
+            for (name, meta) in map {
+                let mut row = serde_json::json!({
+                    "node": name,
+                    "comp": meta.get("comp"),
+                    "static": x3d_scene::support::static_support(name).as_str(),
+                });
+                if let (Some(dir), Some(gpu)) = (&scenes, &gpu) {
+                    let file = dir.join(format!("{name}.x3d"));
+                    if !file.exists() {
+                        row["observed"] = "no_scene".into();
+                    } else {
+                        let mark = x3d_render::validation::mark();
+                        match x3d_scene::load_with(&file, &common.load_options()) {
+                            Err(e) => {
+                                row["observed"] = "load_error".into();
+                                row["error"] = e.to_string().into();
+                            }
+                            Ok(mut scene) => {
+                                scene.advance(0.0);
+                                let r = &scene.report;
+                                let seen = |m: &std::collections::BTreeMap<String, usize>| {
+                                    m.keys().any(|k| k == name || k.starts_with(&format!("{name} ")))
+                                };
+                                row["observed"] = if seen(&r.unsupported) {
+                                    "skipped"
+                                } else if seen(&r.approximated) {
+                                    "approximated"
+                                } else if seen(&r.ignored) {
+                                    "ignored"
+                                } else {
+                                    "loaded"
+                                }
+                                .into();
+                                row["report"] = serde_json::json!({
+                                    "unsupported": r.unsupported, "approximated": r.approximated, "ignored": r.ignored,
+                                    "warnings": r.warnings, "triangles": r.stats.triangles });
+                                let shot = Shot {
+                                    size: (common.size.0, common.size.1),
+                                    msaa: common.msaa,
+                                    settings: common.settings(),
+                                    viewpoint: None,
+                                };
+                                match x3d_render::render_scene(gpu, &scene, &shot) {
+                                    Ok(img) => {
+                                        let lit =
+                                            img.pixels().filter(|p| p.0[..3] != img.get_pixel(0, 0).0[..3]).count();
+                                        row["pixels_differing_from_corner"] = lit.into();
+                                        if let Some(d) = &png_dir {
+                                            let out = d.join(format!("{name}.png"));
+                                            img.save(&out)?;
+                                            row["png"] = out.display().to_string().into();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        row["observed"] = "render_error".into();
+                                        row["error"] = e.to_string().into();
+                                    }
+                                }
+                            }
+                        }
+                        // Agreement between the source's claim and what loading reported.
+                        // A static "skipped" that loads with no loss-report entry is a
+                        // silent drop: the loader did not count it.
+                        row["agree"] = matches!(
+                            (row["static"].as_str(), row["observed"].as_str()),
+                            (Some("drawn" | "silent"), Some("loaded"))
+                                | (Some("approximated"), Some("approximated"))
+                                | (Some("skipped"), Some("skipped" | "ignored"))
+                                | (Some("conditional"), _)
+                        )
+                        .into();
+                        row["vvl"] = x3d_render::validation::row_block(&x3d_render::validation::since(mark));
+                    }
+                }
+                rows.push(row);
+            }
+            let mut tally = std::collections::BTreeMap::<String, usize>::new();
+            for r in &rows {
+                *tally.entry(r["static"].as_str().unwrap_or("?").to_owned()).or_default() += 1;
+            }
+            let out = serde_json::json!({
+                "schema": "x3d-wgpu-coverage/1", "format": "x3d", "renderer": "x3d.wgpu",
+                "gpu": gpu.as_ref().map(x3d_render::Gpu::describe),
+                "static_tally": tally, "nodes": rows,
+                "api_validation": x3d_render::validation::receipt_block(&x3d_render::validation::since(0)),
+            });
+            let text = serde_json::to_string_pretty(&out)?;
+            match json {
+                Some(p) => std::fs::write(p, text)?,
+                None => println!("{text}"),
+            }
             Ok(())
         }
         Command::Info { file, shapes, load_all_inlines } => {
